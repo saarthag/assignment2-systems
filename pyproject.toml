@@ -17,6 +17,8 @@ dependencies = [
     "pandas>=2",
     "ty>=0.0.29",
     "ruff>=0.15.10",
+    "pydantic>=2.13.1",
+    "humanize>=4.16.0",
 ]
 
 [build-system]
@@ -32,7 +34,7 @@ package = true
 python-preference = "managed"
 
 [tool.uv.sources]
-cs336-basics = { path = "./cs336-basics", editable = true } # Change this path to your assignment1-basics repo you want to use your own implementation!
+cs336-basics = { path = "../assignment1-basics/", editable = true } # Change this path to your assignment1-basics repo you want to use your own implementation!
 
 
 
