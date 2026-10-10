@@ -20,6 +20,7 @@ HTTP API (see ``dashboard/README.md`` for details):
 * ``GET  /api/runs/<id>?offset=N``  -> run state, per-step metrics + new logs
 * ``POST /api/runs/<id>/stop``      -> stop a running run
 * ``POST /api/runs/<id>/delete``    -> remove a run
+* ``GET  /api/runs/<id>/report``    -> fetch + download the profiler report
 * ``POST /api/test-connection``     -> probe ssh connectivity (blocking)
 """
 
@@ -62,6 +63,23 @@ DEFAULT_BENCH_CMD = "uv run --no-sync python -m cs336_systems.benchmark"
 DEFAULT_SETUP_CMD = "bash scripts/uv_sync_no_torch.sh"
 SSH_MAX_TIMEOUT = 30
 
+# Optional profiler wrapper (Nsight Systems by default). When enabled the
+# benchmark command is wrapped as ``<profiler> ... -o <prefix> <command>`` and
+# the resulting report is pulled back over SSH on demand.
+DEFAULT_PROFILER_CMD = "nsys profile"
+# Assignment-suggested Nsight Systems flags (NVTX/PyTorch annotations, CUDA and
+# Python backtraces, GPU metrics), plus --force-overwrite true so a re-run never
+# blocks on nsys' interactive overwrite prompt over BatchMode SSH.
+DEFAULT_PROFILER_ARGS = (
+    "--force-overwrite true "
+    "--trace=cuda,cudnn,cublas,osrt,nvtx "
+    "--pytorch=functions-trace,autograd-shapes-nvtx "
+    "--cudabacktrace=all "
+    "--python-backtrace=cuda "
+    "--gpu-metrics-devices=0"
+)
+DEFAULT_PROFILER_DIR = "profiles"
+
 BENCH_FALLBACK = "uv run --no-sync python -m cs336_systems.benchmark"
 
 # Connection fields surfaced in the UI. The pydantic request model is generated
@@ -79,6 +97,15 @@ CONNECTION_FIELDS: list[dict[str, Any]] = [
     {"name": "batch_mode", "label": "Non-interactive SSH", "type": "bool", "default": True, "help": "Adds -o BatchMode=yes so SSH never hangs waiting for a password."},
 ]
 
+# Profiler settings. These are not part of the benchmark CLI; they control how
+# the remote command is wrapped and where the report is written.
+PROFILING_FIELDS: list[dict[str, Any]] = [
+    {"name": "enabled", "label": "Profile with Nsight Systems (nsys)", "type": "bool", "default": False, "help": "Wrap the benchmark command in the profiler and write a report on the instance for download."},
+    {"name": "profiler_cmd", "label": "Profiler command", "type": "str", "default": DEFAULT_PROFILER_CMD, "placeholder": DEFAULT_PROFILER_CMD, "help": "Wrapper prepended to the benchmark command. `nsys profile` for Nsight Systems, or `ncu` for Nsight Compute."},
+    {"name": "profiler_args", "label": "Profiler args", "type": "str", "default": DEFAULT_PROFILER_ARGS, "placeholder": DEFAULT_PROFILER_ARGS, "help": "Extra profiler flags. Defaults to the assignment-suggested nsys flags (NVTX/PyTorch annotations, CUDA + Python backtraces, GPU metrics). `-o <report>` is appended automatically."},
+    {"name": "report_dir", "label": "Remote report dir", "type": "str", "default": DEFAULT_PROFILER_DIR, "placeholder": DEFAULT_PROFILER_DIR, "help": "Where the report is written on the instance (relative to the remote dir, or absolute)."},
+]
+
 MODEL_FIELDS = {"d_model", "d_ff", "num_layers", "num_heads"}
 RUN_FIELDS = {"warmup_steps", "bench_steps", "verbose"}
 PARAM_PRESETS = {
@@ -92,6 +119,10 @@ ConnectionConfig = create_model(
     "ConnectionConfig",
     **{field["name"]: (_TYPE_MAP[field["type"]], field["default"]) for field in CONNECTION_FIELDS},
 )
+ProfilingConfig = create_model(
+    "ProfilingConfig",
+    **{field["name"]: (_TYPE_MAP[field["type"]], field["default"]) for field in PROFILING_FIELDS},
+)
 
 
 class ConnectionRequest(BaseModel):
@@ -101,6 +132,7 @@ class ConnectionRequest(BaseModel):
 class RunRequest(BaseModel):
     connection: ConnectionConfig
     params: dict[str, Any] = Field(default_factory=dict)
+    profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
 
 
 def _coerce(field: dict[str, Any], value: Any) -> Any:
@@ -183,13 +215,39 @@ def _display_ssh(argv: list[str]) -> str:
     return " ".join(shlex.quote(a) for a in argv)
 
 
+def build_profiler_prefix(profiling: dict[str, Any], output_prefix: str) -> str:
+    """Build the profiler wrapper, e.g. ``nsys profile --force-overwrite true -o <prefix>``."""
+    profiler = str(profiling.get("profiler_cmd") or DEFAULT_PROFILER_CMD).strip() or DEFAULT_PROFILER_CMD
+    args = str(profiling.get("profiler_args") or "").strip()
+    parts = [profiler]
+    if args:
+        parts.append(args)
+    parts += ["-o", shlex.quote(output_prefix)]
+    return " ".join(parts)
+
+
+def report_extension(profiler_cmd: str) -> str:
+    """Nsight Compute writes ``.ncu-rep``; Nsight Systems writes ``.nsys-rep``."""
+    return ".ncu-rep" if "ncu" in (profiler_cmd or "") else ".nsys-rep"
+
+
 _STEP_DISPLAY = re.compile(r"^step (\d+): ([\d.]+) ms$")
 
 
 class Run:
     """A single benchmark invocation, its logs and its per-step metrics."""
 
-    def __init__(self, run_id: str, connection: dict[str, Any], params: dict[str, Any], command: str, remote_command: str, argv: list[str]):
+    def __init__(
+        self,
+        run_id: str,
+        connection: dict[str, Any],
+        params: dict[str, Any],
+        command: str,
+        remote_command: str,
+        argv: list[str],
+        profiling: dict[str, Any] | None = None,
+        report_path: str = "",
+    ):
         self.id = run_id
         self.created_at = time.time()
         self.started_at: float | None = None
@@ -202,6 +260,8 @@ class Run:
         self.command = command
         self.remote_command = remote_command
         self.argv = argv
+        self.profiling = dict(profiling or {})
+        self.report_path = report_path or ""
         self.logs: list[dict[str, Any]] = []
         self.metrics: list[dict[str, Any]] = []
         self.result: dict[str, Any] = {}
@@ -277,6 +337,8 @@ class Run:
             "remote_command": self.remote_command,
             "params": self.params,
             "result": self.result,
+            "profiling": self.profiling,
+            "report": self.report_info(),
             "log_count": len(self.logs),
             "metric_count": len(self.metrics),
         }
@@ -296,6 +358,8 @@ class Run:
         meta = self.summary()
         meta["argv"] = self.argv
         meta["connection"] = self.connection
+        meta["profiling"] = self.profiling
+        meta["report_path"] = self.report_path
         (self._dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     def close(self) -> None:
@@ -303,6 +367,48 @@ class Run:
             self._log_fh.close()
         except Exception:
             pass
+
+    # -- profiler report -----------------------------------------------
+    def report_local_path(self) -> Path:
+        return self._dir / (Path(self.report_path).name or "report.nsys-rep")
+
+    def report_info(self) -> dict[str, Any]:
+        enabled = bool(self.profiling.get("enabled")) and bool(self.report_path)
+        return {
+            "enabled": enabled,
+            "remote_path": self.report_path or None,
+            "name": Path(self.report_path).name if self.report_path else None,
+            "downloaded": enabled and self.report_local_path().exists(),
+        }
+
+    def fetch_report(self) -> tuple[bool, str | None]:
+        """Copy the profiler report from the instance over SSH (cached locally)."""
+        if not (self.profiling.get("enabled") and self.report_path):
+            return False, "profiling was not enabled for this run"
+        local = self.report_local_path()
+        if local.exists() and local.stat().st_size > 0:
+            return True, None
+        remote_dir = str(self.connection.get("remote_dir") or DEFAULT_REMOTE_DIR)
+        remote = (
+            f"cd {shlex.quote(remote_dir)}"
+            f" && test -f {shlex.quote(self.report_path)}"
+            f" && cat {shlex.quote(self.report_path)}"
+        )
+        argv = build_ssh_argv(self.connection, remote)
+        self.ingest(f"[dashboard] fetching profiler report: {self.report_path}")
+        try:
+            with local.open("wb") as fh:
+                proc = subprocess.run(argv, stdout=fh, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            return False, "ssh executable not found on PATH"
+        if proc.returncode != 0:
+            local.unlink(missing_ok=True)
+            detail = (proc.stderr or b"").decode(errors="replace").strip()
+            return False, detail or f"ssh exited with code {proc.returncode}"
+        if not local.exists() or local.stat().st_size == 0:
+            local.unlink(missing_ok=True)
+            return False, "remote report is empty or missing"
+        return True, None
 
     @classmethod
     def load(cls, run_dir: Path) -> Run | None:
@@ -320,6 +426,8 @@ class Run:
             meta.get("command", ""),
             meta.get("remote_command", ""),
             meta.get("argv", []),
+            meta.get("profiling", {}),
+            meta.get("report_path", ""),
         )
         run.created_at = meta.get("created_at", run.created_at)
         run.started_at = meta.get("started_at")
@@ -391,7 +499,8 @@ class Runner:
     """Spawns ssh and pumps the merged stdout/stderr into a :class:`Run`."""
 
     @staticmethod
-    def start(store: RunStore, connection: dict[str, Any], params: dict[str, Any]) -> Run:
+    def start(store: RunStore, connection: dict[str, Any], params: dict[str, Any], profiling: dict[str, Any] | None = None) -> Run:
+        profiling = dict(profiling or {})
         schema = extract_cli_schema()
         env_path = str(connection.get("env_path") or DEFAULT_ENV_PATH)
         command = build_remote_command(
@@ -402,11 +511,21 @@ class Runner:
         )
         remote_dir = str(connection.get("remote_dir") or DEFAULT_REMOTE_DIR)
         setup = expand_env(str(connection.get("setup_cmd") or ""), env_path)
+
+        run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        report_path = ""
+        if profiling.get("enabled"):
+            report_dir = str(profiling.get("report_dir") or DEFAULT_PROFILER_DIR).strip() or DEFAULT_PROFILER_DIR
+            mkdir = f"mkdir -p {shlex.quote(report_dir)}"
+            setup = f"{mkdir} && {setup}" if setup.strip() else mkdir
+            report_prefix = f"{report_dir.rstrip('/')}/{run_id}"
+            command = f"{build_profiler_prefix(profiling, report_prefix)} {command}"
+            report_path = f"{report_prefix}{report_extension(str(profiling.get('profiler_cmd') or ''))}"
+
         remote_command = build_full_remote(remote_dir, env_path, setup, command)
         argv = build_ssh_argv(connection, remote_command)
 
-        run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-        run = Run(run_id, dict(connection), dict(params), command, remote_command, argv)
+        run = Run(run_id, dict(connection), dict(params), command, remote_command, argv, profiling, report_path)
         store.add(run)
         threading.Thread(target=Runner._run, args=(run,), daemon=True).start()
         return run
@@ -533,7 +652,7 @@ def plotly_bundle() -> FileResponse:
 
 @app.get("/api/schema")
 def api_schema() -> dict[str, Any]:
-    return {"connection": CONNECTION_FIELDS, "benchmark": SCHEMA, "presets": PARAM_PRESETS}
+    return {"connection": CONNECTION_FIELDS, "benchmark": SCHEMA, "profiling": PROFILING_FIELDS, "presets": PARAM_PRESETS}
 
 
 @app.get("/api/runs")
@@ -551,7 +670,9 @@ def api_start_run(req: RunRequest) -> dict[str, Any]:
     if missing:
         raise HTTPException(status_code=400, detail="missing required parameters: " + ", ".join(missing))
     clean_params = {key: _coerce({"type": next((s["type"] for s in SCHEMA if s["name"] == key), "str")}, value) for key, value in params.items()}
-    run = Runner.start(STORE, connection, clean_params)
+    raw_profiling = req.profiling.model_dump()
+    profiling = {field["name"]: _coerce(field, raw_profiling.get(field["name"])) for field in PROFILING_FIELDS}
+    run = Runner.start(STORE, connection, clean_params, profiling)
     return run.summary()
 
 
@@ -575,6 +696,20 @@ def api_stop_run(run_id: str) -> dict[str, Any]:
 @app.post("/api/runs/{run_id}/delete")
 def api_delete_run(run_id: str) -> dict[str, Any]:
     return {"deleted": STORE.delete(run_id)}
+
+
+@app.get("/api/runs/{run_id}/report")
+def api_download_report(run_id: str) -> FileResponse:
+    run = STORE.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not (run.profiling.get("enabled") and run.report_path):
+        raise HTTPException(status_code=400, detail="profiling was not enabled for this run")
+    ok, error = run.fetch_report()
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"could not fetch report: {error}")
+    local = run.report_local_path()
+    return FileResponse(local, filename=local.name, media_type="application/octet-stream")
 
 
 @app.post("/api/test-connection")

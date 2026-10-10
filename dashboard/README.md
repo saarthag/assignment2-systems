@@ -106,17 +106,59 @@ shapes are provided.
   availability, the no-torch sync script and whether the per-step flag is
   deployed.
 * Stop, download-log, delete-run and command preview.
+* Optional Nsight Systems / Nsight Compute profiling wrapper with on-demand
+  report download (see **Profiling** below).
+
+## Profiling (optional)
+
+The **Profiling** section wraps the benchmark command in a profiler and writes a
+report on the instance. It is off by default. Enable **Profile with Nsight
+Systems (nsys)** and the generated remote command becomes:
+
+```sh
+mkdir -p "profiles" && bash scripts/uv_sync_no_torch.sh \
+  && exec nsys profile --force-overwrite true \
+       --trace=cuda,cudnn,cublas,osrt,nvtx \
+       --pytorch=functions-trace,autograd-shapes-nvtx \
+       --cudabacktrace=all --python-backtrace=cuda --gpu-metrics-devices=0 \
+       -o profiles/<run-id> \
+       uv run --no-sync python -m cs336_systems.benchmark --per-step-timing <args...>
+```
+
+Notes:
+
+* `profiler_cmd` defaults to `nsys profile`; set it to `ncu` (Nsight Compute) to
+  profile kernels instead. The report extension follows the tool
+  (`.nsys-rep` / `.ncu-rep`).
+* `profiler_args` defaults to the assignment-suggested nsys flags above
+  (NVTX/PyTorch annotations, CUDA + Python backtraces, GPU metrics) plus
+  `--force-overwrite true`. The `-o <report>` path is appended automatically.
+  Edit the field to change them, or clear it for a bare `nsys profile`.
+  `--gpu-metrics-devices=0` requires the container to be allowed to collect GPU
+  metrics; if it is not, nsys logs a warning but the CUDA trace still records.
+* Profiling settings (including the args) are persisted per browser. After
+  upgrading the defaults, clear the dashboard's local storage (or hard-reload /
+  use a private window) to pick up the new flags.
+* `report_dir` defaults to `profiles/` under the remote assignment directory and
+  is created automatically. The report is named after the run id.
+* Once a profiled run finishes, a **download report** button appears next to
+  **download** in the output toolbar. Clicking it pulls the report from the
+  instance over SSH on the machine running `server.py` (cached in
+  `dashboard/.runs/<id>/`), then serves it to the browser.
+* If `nsys`/`ncu` is not installed or not on `PATH`, the run fails with the
+  profiler's error in the log panel.
 
 ## HTTP API
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/schema` | Connection fields, benchmark option schema, presets. |
+| `GET` | `/api/schema` | Connection fields, benchmark option schema, profiling fields, presets. |
 | `GET` | `/api/runs` | Run summaries, newest first. |
-| `POST` | `/api/runs` | Start a run: `{"connection": {...}, "params": {...}}`. |
+| `POST` | `/api/runs` | Start a run: `{"connection": {...}, "params": {...}, "profiling": {...}}`. |
 | `GET` | `/api/runs/<id>?offset=N` | Run state, per-step metrics + log lines from `N`. |
 | `POST` | `/api/runs/<id>/stop` | Stop a running benchmark. |
 | `POST` | `/api/runs/<id>/delete` | Delete a run and its log. |
+| `GET` | `/api/runs/<id>/report` | Fetch (over SSH) and download the profiler report. |
 | `POST` | `/api/test-connection` | Probe SSH connectivity (blocking). |
 
 ## Files

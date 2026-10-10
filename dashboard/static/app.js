@@ -4,10 +4,12 @@
 // State
 // ---------------------------------------------------------------------------
 const state = {
-  schema: { connection: [], benchmark: [], presets: {} },
+  schema: { connection: [], benchmark: [], profiling: [], presets: {} },
   connection: {},
   params: {},
+  profiling: {},
   currentRun: null,
+  currentRunReportName: null,
   offset: 0,
   pollTimer: null,
   elapsedTimer: null,
@@ -15,12 +17,13 @@ const state = {
 };
 
 const LS_KEY = "cs336-dashboard-connection-v1";
+const LS_PROFILING_KEY = "cs336-dashboard-profiling-v2";
 const REQUIRED = new Set(["d_model", "d_ff", "num_layers", "num_heads"]);
 const ORDER = [
   "d_model", "d_ff", "num_layers", "num_heads", "vocab_size", "context_length", "theta",
   "batch_size", "compute", "warmup_steps", "bench_steps", "verbose",
 ];
-const LONG_TEXT = new Set(["bench_cmd", "setup_cmd", "extra_args"]);
+const LONG_TEXT = new Set(["bench_cmd", "setup_cmd", "extra_args", "profiler_cmd", "profiler_args", "report_dir"]);
 // Per-field minimums. warmup_steps=0 disables warmup; everything else must be >= 1.
 const MIN_VALUE = { warmup_steps: 0 };
 // Dashboard defaults that differ from the CLI defaults (the graph needs per-step data).
@@ -83,8 +86,15 @@ async function loadSchema() {
     else state.params[field.name] = field.type === "bool" ? !!field.default : field.default;
   }
 
+  const savedProfiling = JSON.parse(localStorage.getItem(LS_PROFILING_KEY) || "{}");
+  for (const field of state.schema.profiling || []) {
+    const stored = savedProfiling[field.name];
+    state.profiling[field.name] = stored !== undefined ? stored : field.type === "bool" ? !!field.default : field.default;
+  }
+
   renderConnectionFields();
   renderBenchmarkFields();
+  renderProfilingFields();
   renderPresets();
   updatePreview();
 }
@@ -194,6 +204,43 @@ function renderBenchmarkFields() {
   }
 }
 
+function renderProfilingFields() {
+  const container = $("#profiling-fields");
+  if (!container) return;
+  container.innerHTML = "";
+  for (const field of state.schema.profiling || []) {
+    const wide = LONG_TEXT.has(field.name);
+    const wrap = el("div", "field" + (wide ? " wide" : ""));
+    const label = el("label", null, field.label);
+    wrap.appendChild(label);
+
+    if (field.type === "bool") {
+      const input = el("input");
+      input.type = "checkbox";
+      input.checked = !!state.profiling[field.name];
+      label.prepend(input);
+      input.addEventListener("change", () => {
+        state.profiling[field.name] = input.checked;
+        persistProfiling();
+        updatePreview();
+      });
+    } else {
+      const input = el("input");
+      input.type = "text";
+      if (field.placeholder) input.placeholder = field.placeholder;
+      input.value = state.profiling[field.name] ?? "";
+      input.addEventListener("input", () => {
+        state.profiling[field.name] = input.value;
+        persistProfiling();
+        updatePreview();
+      });
+      wrap.appendChild(input);
+    }
+    if (field.help) wrap.appendChild(el("div", "hint", field.help));
+    container.appendChild(wrap);
+  }
+}
+
 function renderPresets() {
   const container = $("#presets");
   container.innerHTML = "";
@@ -212,6 +259,19 @@ function renderPresets() {
 
 function persistConnection() {
   localStorage.setItem(LS_KEY, JSON.stringify(state.connection));
+}
+
+function persistProfiling() {
+  localStorage.setItem(LS_PROFILING_KEY, JSON.stringify(state.profiling));
+}
+
+function collectProfiling() {
+  const out = {};
+  for (const field of state.schema.profiling || []) {
+    if (field.type === "bool") out[field.name] = !!state.profiling[field.name];
+    else if (state.profiling[field.name] !== "" && state.profiling[field.name] != null) out[field.name] = state.profiling[field.name];
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,10 +309,25 @@ function buildPreview() {
   const setup = (state.connection.setup_cmd || "").replaceAll("{env}", env);
   const remoteDir = state.connection.remote_dir || "/workspace/assignment2";
   const flags = buildFlagString();
-  const command = [bench, flags].filter(Boolean).join(" ");
+  let command = [bench, flags].filter(Boolean).join(" ");
+  let setupText = setup.trim();
+
+  const profiling = collectProfiling();
+  if (profiling.enabled) {
+    const reportDir = (profiling.report_dir || "profiles").replace(/\/+$/, "") || "profiles";
+    const prefixCmd = [
+      profiling.profiler_cmd || "nsys profile",
+      profiling.profiler_args || "",
+      "-o",
+      shellQuote(`${reportDir}/<run-id>`),
+    ].filter(Boolean).join(" ");
+    command = `${prefixCmd} ${command}`;
+    const mkdir = `mkdir -p ${shellQuote(reportDir)}`;
+    setupText = setupText ? `${mkdir} && ${setupText}` : mkdir;
+  }
 
   let remote = `cd ${shellQuote(remoteDir)} && export UV_PROJECT_ENVIRONMENT=${shellQuote(env)}`;
-  if (setup.trim()) remote += ` && ${setup.trim()}`;
+  if (setupText) remote += ` && ${setupText}`;
   remote += ` && exec ${command}`;
 
   const sshParts = ["ssh", "-T", "-p", String(state.connection.port || 22)];
@@ -319,7 +394,7 @@ async function startRun(event) {
     const res = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ connection: state.connection, params }),
+      body: JSON.stringify({ connection: state.connection, params, profiling: collectProfiling() }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed to start run");
@@ -348,6 +423,13 @@ function selectRun(runId) {
   $("#result-cards").innerHTML = "";
   $("#log").innerHTML = "";
   $("#log-count").textContent = "";
+  state.currentRunReportName = null;
+  const reportBtn = $("#download-report");
+  if (reportBtn) {
+    reportBtn.classList.add("hidden");
+    reportBtn.disabled = false;
+    reportBtn.textContent = "download report";
+  }
   stopPolling();
   poll();
 }
@@ -433,7 +515,31 @@ function renderRunState(run) {
   renderResults(run);
   renderPlot(run);
   renderElapsed(run);
+  renderReportButton(run);
   markActiveHistory(run.id);
+}
+
+function renderReportButton(run) {
+  const btn = $("#download-report");
+  if (!btn) return;
+  const report = run.report || {};
+  if (!report.enabled) {
+    btn.classList.add("hidden");
+    state.currentRunReportName = null;
+    return;
+  }
+  state.currentRunReportName = report.name || `report-${run.id}`;
+  btn.classList.remove("hidden");
+  const ready = TERMINAL.has(run.status);
+  if (!ready) {
+    btn.disabled = true;
+    btn.title = "The report is written when the run finishes";
+    btn.textContent = "download report";
+    return;
+  }
+  btn.disabled = false;
+  btn.title = "Fetch the profiler report from the instance over SSH";
+  btn.textContent = report.downloaded ? "download report (cached)" : "download report";
 }
 
 function renderPlot(run) {
@@ -627,6 +733,36 @@ async function downloadLog() {
   URL.revokeObjectURL(a.href);
 }
 
+async function downloadReport() {
+  if (!state.currentRun) return;
+  const btn = $("#download-report");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "fetching…";
+  toast("Fetching profiler report over SSH…");
+  try {
+    const res = await fetch(`/api/runs/${state.currentRun}/report`);
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.json()).detail; } catch (_) { /* non-JSON error */ }
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const name = state.currentRunReportName || `report-${state.currentRun}.nsys-rep`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("Profiler report downloaded", "ok");
+  } catch (err) {
+    toast("Report download failed: " + (err.message || err), "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 function clearView() {
   $("#log").innerHTML = "";
 }
@@ -639,6 +775,7 @@ function wire() {
   $("#test-connection").addEventListener("click", testConnection);
   $("#stop-btn").addEventListener("click", stopRun);
   $("#download-log").addEventListener("click", downloadLog);
+  $("#download-report").addEventListener("click", downloadReport);
   $("#clear-view").addEventListener("click", clearView);
   $("#reset-connection").addEventListener("click", () => {
     localStorage.removeItem(LS_KEY);
