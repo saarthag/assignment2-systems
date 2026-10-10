@@ -1,6 +1,8 @@
 import argparse
+import json
 import logging
 import shlex
+import statistics
 from functools import partial
 from typing import Any
 import timeit
@@ -61,6 +63,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("-n", "--bench-steps", type=int, default=100, help="number of timed steps (default: 100)")
 
     parser.add_argument("-v", "--verbose", action="store_true", help="enable debug logging")
+    parser.add_argument("--per-step-timing", action="store_true", help="emit per-step timings as JSON lines (used by the dashboard)")
     return parser.parse_args(argv)
 
 
@@ -92,6 +95,7 @@ def bench(
     optimizer: AdamW | None = None,
     warmup_steps: int = 10,
     bench_steps: int = 100,
+    per_step_timing: bool = False,
 ) -> float:
     device = torch.accelerator.current_accelerator() or torch.device("cpu")
     logger.info("Using device: %s", device)
@@ -108,9 +112,17 @@ def bench(
     torch.accelerator.synchronize()
 
     logger.info("Benchmarking %d step(s) (compute=%s)", bench_steps, compute)
+    step_times: list[float] = []
     start_time = timeit.default_timer()
-    for _ in range(bench_steps):
+    for index in range(bench_steps):
+        if per_step_timing:
+            step_start = timeit.default_timer()
         step(model, x, y, compute, optimizer)
+        if per_step_timing:
+            torch.accelerator.synchronize()
+            step_ms = (timeit.default_timer() - step_start) * 1e3
+            step_times.append(step_ms)
+            print(json.dumps({"event": "step", "step": index + 1, "ms": step_ms}), flush=True)
 
     torch.accelerator.synchronize()
     end_time = timeit.default_timer()
@@ -118,6 +130,22 @@ def bench(
     elapsed = end_time - start_time
     per_step = elapsed / bench_steps
     logger.info("Per-step time: %.3f ms (%d steps in %.3f s)", per_step * 1e3, bench_steps, elapsed)
+    if per_step_timing:
+        print(
+            json.dumps(
+                {
+                    "event": "summary",
+                    "steps": len(step_times),
+                    "mean_ms": statistics.fmean(step_times),
+                    "std_ms": statistics.pstdev(step_times) if len(step_times) > 1 else 0.0,
+                    "min_ms": min(step_times),
+                    "max_ms": max(step_times),
+                    "median_ms": statistics.median(step_times),
+                    "total_s": elapsed,
+                }
+            ),
+            flush=True,
+        )
     return per_step
 
 
@@ -151,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         optimizer=optimizer,
         warmup_steps=args.warmup_steps,
         bench_steps=args.bench_steps,
+        per_step_timing=args.per_step_timing,
     )
 
     return 0

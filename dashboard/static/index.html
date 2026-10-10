@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CS336 Benchmark Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316233a'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%235b9dff'%3E%E2%96%9A%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">▚</span>
+      <div>
+        <h1>CS336 Benchmark Dashboard</h1>
+        <p class="subtitle">Per-step timings from a Vast.ai instance over SSH</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="conn-status" class="pill muted">not connected</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ===================== Left: configuration ===================== -->
+    <aside class="panel config-panel">
+      <form id="config-form">
+        <section class="section">
+          <div class="section-head">
+            <h2>Connection</h2>
+            <button type="button" id="reset-connection" class="link-btn">reset</button>
+          </div>
+          <div id="connection-fields" class="fields"></div>
+          <div class="row actions">
+            <button type="button" id="test-connection" class="btn ghost">Test connection</button>
+          </div>
+          <pre id="connection-output" class="probe-output hidden"></pre>
+        </section>
+
+        <section class="section">
+          <div class="section-head">
+            <h2>Benchmark parameters</h2>
+            <div class="presets" id="presets"></div>
+          </div>
+          <div id="benchmark-fields" class="fields"></div>
+        </section>
+
+        <section class="section">
+          <div class="section-head"><h2>Command preview</h2></div>
+          <pre id="command-preview" class="command-preview"></pre>
+        </section>
+
+        <div class="run-actions">
+          <button type="submit" id="run-btn" class="btn primary">▶ Run benchmark</button>
+          <button type="button" id="stop-btn" class="btn danger" disabled>■ Stop</button>
+        </div>
+      </form>
+    </aside>
+
+    <!-- ===================== Right: graph + logs ===================== -->
+    <section class="panel output-panel">
+      <div class="output-head">
+        <div class="run-title">
+          <h2 id="run-title">No run selected</h2>
+          <span id="run-status" class="pill muted">idle</span>
+        </div>
+        <div class="output-tools">
+          <label class="checkbox"><input type="checkbox" id="follow-log" checked /> follow logs</label>
+          <button type="button" id="download-log" class="btn tiny ghost">download</button>
+          <button type="button" id="clear-view" class="btn tiny ghost">clear view</button>
+        </div>
+      </div>
+
+      <!-- Primary panel: per-step time graph -->
+      <div class="main-panel">
+        <div class="panel-head">
+          <h2>Per-step time</h2>
+          <span id="plot-summary" class="muted small"></span>
+        </div>
+        <div id="plot" class="plot"></div>
+        <div id="plot-empty" class="plot-empty">No per-step data yet — run a benchmark to plot step number vs elapsed time.</div>
+        <div id="result-cards" class="result-cards"></div>
+      </div>
+
+      <!-- Secondary panel: logs -->
+      <div class="logs-panel">
+        <div class="panel-head">
+          <h2>Logs</h2>
+          <span id="log-count" class="muted small"></span>
+        </div>
+        <div id="log" class="log" tabindex="0"></div>
+      </div>
+
+      <div class="history">
+        <div class="section-head">
+          <h2>History</h2>
+          <span id="history-count" class="muted small"></span>
+        </div>
+        <div id="history-list" class="history-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/plotly.min.js"></script>
+  <script>window.Plotly || document.write('<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"><\/script>');</script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -55,6 +55,13 @@ line-length = 180
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
 
+[dependency-groups]
+dashboard = [
+    "fastapi>=0.142.2",
+    "plotly>=7.1.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
 [tool.ruff.lint]
 extend-select = ["UP"]
 ignore = ["F722"]
