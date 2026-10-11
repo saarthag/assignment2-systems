@@ -429,12 +429,15 @@ function selectRun(runId) {
   $("#log").innerHTML = "";
   $("#log-count").textContent = "";
   state.currentRunReportName = null;
-  const reportBtn = $("#download-report");
-  if (reportBtn) {
-    reportBtn.classList.add("hidden");
-    reportBtn.disabled = false;
+  const reportItem = $("#menu-download-report");
+  if (reportItem) {
+    reportItem.classList.add("hidden");
+    reportItem.disabled = false;
     setReportLabel("Download nsys report");
   }
+  const graphItem = $("#menu-export-graph");
+  if (graphItem) graphItem.disabled = true;
+  setMenuOpen(false);
   stopPolling();
   poll();
 }
@@ -525,12 +528,12 @@ function renderRunState(run) {
 }
 
 function setReportLabel(text) {
-  const label = $("#download-report")?.querySelector(".btn-label");
+  const label = $("#menu-download-report")?.querySelector(".btn-label");
   if (label) label.textContent = text;
 }
 
 function setReportBusy(busy) {
-  const btn = $("#download-report");
+  const btn = $("#menu-download-report");
   if (!btn) return;
   const icon = btn.querySelector(".btn-icon");
   const spinner = btn.querySelector(".btn-spinner");
@@ -539,7 +542,7 @@ function setReportBusy(busy) {
 }
 
 function renderReportButton(run) {
-  const btn = $("#download-report");
+  const btn = $("#menu-download-report");
   if (!btn) return;
   const report = run.report || {};
   if (!report.enabled) {
@@ -563,6 +566,8 @@ function renderReportButton(run) {
 
 function renderPlot(run) {
   const metrics = run.metrics || [];
+  const graphItem = $("#menu-export-graph");
+  if (graphItem) graphItem.disabled = !metrics.length;
   const plotEl = $("#plot");
   const emptyEl = $("#plot-empty");
 
@@ -792,7 +797,7 @@ async function downloadLog() {
 
 async function downloadReport() {
   if (!state.currentRun) return;
-  const btn = $("#download-report");
+  const btn = $("#menu-download-report");
   const original = btn.querySelector(".btn-label")?.textContent || "Download nsys report";
   btn.disabled = true;
   setReportBusy(true);
@@ -823,6 +828,109 @@ async function downloadReport() {
   }
 }
 
+function setMenuOpen(open) {
+  const menu = $("#export-menu");
+  const btn = $("#export-menu-btn");
+  if (!menu || !btn) return;
+  menu.classList.toggle("hidden", !open);
+  btn.setAttribute("aria-expanded", String(open));
+}
+
+function setExportLabel(text) {
+  const label = $("#menu-export-graph")?.querySelector(".btn-label");
+  if (label) label.textContent = text;
+}
+
+function setExportAllLabel(text) {
+  const label = $("#export-all")?.querySelector(".btn-label");
+  if (label) label.textContent = text;
+}
+
+// Render the current graph to a PNG data URL, with the panel background baked
+// in (the live graph is transparent so it inherits the panel colour).
+async function captureGraphPng() {
+  if (!window.Plotly) return null;
+  const plotEl = $("#plot");
+  if (!plotEl || plotEl.classList.contains("hidden")) return null;
+  const bg = "#131a23";
+  await Plotly.relayout(plotEl, { "paper_bgcolor": bg, "plot_bgcolor": bg });
+  try {
+    return await Plotly.toImage(plotEl, {
+      format: "png",
+      width: plotEl.clientWidth,
+      height: plotEl.clientHeight,
+      scale: 2,
+    });
+  } finally {
+    try {
+      await Plotly.relayout(plotEl, { "paper_bgcolor": "rgba(0,0,0,0)", "plot_bgcolor": "rgba(0,0,0,0)" });
+    } catch (_) {
+      /* the plot may have been replaced mid-export */
+    }
+  }
+}
+
+async function exportPlot() {
+  if (!state.currentRun || !window.Plotly) return;
+  const btn = $("#menu-export-graph");
+  const original = btn.querySelector(".btn-label")?.textContent || "Export graph (PNG)";
+  btn.disabled = true;
+  setExportLabel("Exporting…");
+  try {
+    const url = await captureGraphPng();
+    if (!url) throw new Error("no graph to export");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `per-step-${state.currentRun}.png`;
+    a.click();
+    toast("Graph exported as PNG", "ok");
+  } catch (err) {
+    toast("Export failed: " + (err.message || err), "error");
+  } finally {
+    btn.disabled = false;
+    setExportLabel(original);
+  }
+}
+
+async function exportAll() {
+  if (!state.currentRun) return;
+  const btn = $("#export-all");
+  const original = btn.querySelector(".btn-label")?.textContent || "Export all";
+  btn.disabled = true;
+  setExportAllLabel("Packaging…");
+  toast("Packaging run archive…");
+  try {
+    let graph = null;
+    try {
+      graph = await captureGraphPng();
+    } catch (_) {
+      /* export the archive without the graph rather than failing */
+    }
+    const res = await fetch(`/api/runs/${state.currentRun}/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ graph_png: graph }),
+    });
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.json()).detail; } catch (_) { /* non-JSON error */ }
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${state.currentRun}.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("Run archive exported", "ok");
+  } catch (err) {
+    toast("Export failed: " + (err.message || err), "error");
+  } finally {
+    btn.disabled = false;
+    setExportAllLabel(original);
+  }
+}
+
 function clearView() {
   $("#log").innerHTML = "";
 }
@@ -835,8 +943,20 @@ function wire() {
   $("#test-connection").addEventListener("click", testConnection);
   $("#sync-remote").addEventListener("click", syncToRemote);
   $("#stop-btn").addEventListener("click", stopRun);
-  $("#download-log").addEventListener("click", downloadLog);
-  $("#download-report").addEventListener("click", downloadReport);
+  $("#export-menu-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    setMenuOpen($("#export-menu").classList.contains("hidden"));
+  });
+  $("#menu-export-graph").addEventListener("click", () => { setMenuOpen(false); exportPlot(); });
+  $("#menu-download-log").addEventListener("click", () => { setMenuOpen(false); downloadLog(); });
+  $("#menu-download-report").addEventListener("click", () => { setMenuOpen(false); downloadReport(); });
+  $("#export-all").addEventListener("click", exportAll);
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".menu")) setMenuOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setMenuOpen(false);
+  });
   $("#clear-view").addEventListener("click", clearView);
   $("#reset-connection").addEventListener("click", () => {
     localStorage.removeItem(LS_KEY);

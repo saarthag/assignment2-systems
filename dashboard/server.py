@@ -23,11 +23,14 @@ HTTP API (see ``dashboard/README.md`` for details):
 * ``GET  /api/runs/<id>/report``    -> fetch + download the profiler report
 * ``POST /api/test-connection``     -> probe ssh connectivity (blocking)
 * ``POST /api/sync``                -> push the local working tree to the remote dir
+* ``POST /api/runs/<id>/export``    -> zip the log, report and graph for download
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import os
 import re
@@ -38,6 +41,7 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.responses import FileResponse, Response  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel, Field, create_model  # noqa: E402
 from schema import extract_cli_schema  # noqa: E402
@@ -120,7 +124,9 @@ RUN_FIELDS = {"warmup_steps", "bench_steps", "verbose"}
 PARAM_PRESETS = {
     "small": {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12},
     "medium": {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16},
-    "large": {"d_model": 2560, "d_ff": 10240, "num_layers": 32, "num_heads": 32},
+    "large": {"d_model": 1280, "d_ff": 5120, "num_layers": 36, "num_heads": 20},
+    "xl": {"d_model": 2560, "d_ff": 10240, "num_layers": 32, "num_heads": 32},
+    "10B": {"d_model": 4608, "d_ff": 12288, "num_layers": 50, "num_heads": 36},
 }
 
 _TYPE_MAP = {"str": str, "int": int, "bool": bool}
@@ -142,6 +148,11 @@ class RunRequest(BaseModel):
     connection: ConnectionConfig
     params: dict[str, Any] = Field(default_factory=dict)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+
+
+class ExportRequest(BaseModel):
+    # Optional base64 data URL of the graphed PNG, rendered client-side by Plotly.
+    graph_png: str | None = None
 
 
 def _coerce(field: dict[str, Any], value: Any) -> Any:
@@ -790,6 +801,38 @@ def api_test_connection(req: ConnectionRequest) -> dict[str, Any]:
 @app.post("/api/sync")
 def api_sync(req: ConnectionRequest) -> dict[str, Any]:
     return sync_to_remote(req.connection.model_dump())
+
+
+@app.post("/api/runs/{run_id}/export")
+def api_export_run(run_id: str, req: ExportRequest | None = None) -> Response:
+    """Bundle a run's log, profiler report and (optional) graph into a zip."""
+    run = STORE.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    # Fetch/reuse the report first so the fetch progress line is captured in the
+    # log written below. A failed fetch just omits the report from the archive.
+    if run.profiling.get("enabled") and run.report_path:
+        run.fetch_report()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        meta = {**run.summary(), "argv": run.argv, "connection": run.connection}
+        archive.writestr("run.json", json.dumps(meta, indent=2))
+        archive.writestr("benchmark.log", "\n".join(line["text"] for line in run.logs))
+        local_report = run.report_local_path()
+        if run.report_info().get("downloaded") and local_report.exists():
+            archive.write(local_report, arcname=local_report.name)
+        graph = req.graph_png if req else None
+        if isinstance(graph, str) and graph.startswith("data:image/png;base64,"):
+            try:
+                archive.writestr("per-step.png", base64.b64decode(graph.split(",", 1)[1]))
+            except (ValueError, TypeError):
+                pass
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{run.id}.zip"'},
+    )
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

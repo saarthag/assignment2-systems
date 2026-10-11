@@ -81,11 +81,53 @@
         </div>
         <div class="output-tools">
           <label class="checkbox"><input type="checkbox" id="follow-log" checked /> follow logs</label>
-          <button type="button" id="download-log" class="btn tiny ghost">download</button>
-          <button type="button" id="download-report" class="btn tiny ghost hidden" title="Download the Nsight Systems report">
-            <img class="btn-icon" src="/static/nvidia-logo.png" alt="" aria-hidden="true" />
-            <span class="btn-spinner hidden" aria-hidden="true"></span>
-            <span class="btn-label">Download nsys report</span>
+          <div class="menu">
+            <button type="button" id="export-menu-btn" class="btn tiny ghost" aria-haspopup="true" aria-expanded="false" title="Download run artifacts">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><!-- lucide: download -->
+                <path d="M12 15V3" />
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <path d="m7 10 5 5 5-5" />
+              </svg>
+              <span class="btn-label">Export</span>
+              <svg class="btn-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><!-- lucide: chevron-down -->
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+            <div class="menu-list hidden" id="export-menu" role="menu">
+              <button type="button" class="menu-item" id="menu-export-graph" role="menuitem" title="Export the per-step graph as a PNG" disabled>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><!-- lucide: image-down -->
+                  <path d="M10.3 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10l-3.1-3.1a2 2 0 0 0-2.814.014L6 21" />
+                  <path d="m14 19 3 3v-5.5" />
+                  <path d="m17 22 3-3" />
+                  <circle cx="9" cy="9" r="2" />
+                </svg>
+                <span class="btn-label">Export graph (PNG)</span>
+              </button>
+              <button type="button" class="menu-item" id="menu-download-log" role="menuitem">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><!-- lucide: file-text -->
+                  <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />
+                  <path d="M14 2v5a1 1 0 0 0 1 1h5" />
+                  <path d="M10 9H8" />
+                  <path d="M16 13H8" />
+                  <path d="M16 17H8" />
+                </svg>
+                <span class="btn-label">Download logs</span>
+              </button>
+              <button type="button" class="menu-item hidden" id="menu-download-report" role="menuitem" title="Download the Nsight Systems report">
+                <img class="btn-icon" src="/static/nvidia-logo.png" alt="" aria-hidden="true" />
+                <span class="btn-spinner hidden" aria-hidden="true"></span>
+                <span class="btn-label">Download nsys report</span>
+              </button>
+            </div>
+          </div>
+          <button type="button" id="export-all" class="btn tiny ghost" title="Download logs, Nsight report and graph as a .zip">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><!-- lucide: package -->
+              <path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z" />
+              <path d="M12 22V12" />
+              <polyline points="3.29 7 12 12 20.71 7" />
+              <path d="m7.5 4.27 9 5.15" />
+            </svg>
+            <span class="btn-label">Export all</span>
           </button>
           <button type="button" id="clear-view" class="btn tiny ghost">clear view</button>
         </div>

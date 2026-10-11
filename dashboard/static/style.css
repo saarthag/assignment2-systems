@@ -79,9 +79,9 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .section:last-of-type { border-bottom: none; }
 .section-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 10px; gap: 8px;
+  margin-bottom: 10px; gap: 8px; flex-wrap: wrap;
 }
-.section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-dim); margin: 0; }
+.section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-dim); margin: 0; white-space: nowrap; }
 
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -111,7 +111,7 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .field input[type="checkbox"] { width: auto; }
 .checkbox { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
 
-.presets { display: flex; gap: 6px; }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .presets button {
   background: #182333; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 6px; font-size: 11px; padding: 3px 8px; cursor: pointer;
@@ -146,6 +146,24 @@ code { font-family: var(--mono); font-size: 0.9em; }
   border-radius: 50%; animation: btn-spin 0.7s linear infinite;
 }
 @keyframes btn-spin { to { transform: rotate(360deg); } }
+
+.menu { position: relative; }
+.btn-caret { width: 12px; height: 12px; display: block; flex: none; opacity: 0.7; }
+.menu-list {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 50;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+  padding: 4px; min-width: 210px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 8px;
+  background: transparent; border: none; color: var(--text); text-align: left;
+  padding: 7px 9px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.menu-item:hover:not(:disabled) { background: #1c2634; }
+.menu-item:disabled { opacity: 0.45; cursor: not-allowed; }
+.menu-item .btn-label { flex: 1; }
+.menu-item .btn-icon { width: 14px; height: 14px; }
 .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0; }
 
 .run-actions { display: flex; gap: 10px; padding-top: 14px; position: sticky; bottom: -16px; background: linear-gradient(180deg, transparent, var(--panel) 30%); padding-bottom: 4px; }

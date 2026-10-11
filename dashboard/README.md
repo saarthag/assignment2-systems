@@ -99,12 +99,17 @@ in `cs336_systems/benchmark.py` with `ast` (see `dashboard/schema.py`). It does
 
 Fields left blank are omitted from the command, so the model's pydantic defaults
 apply. `d_model`, `d_ff`, `num_layers` and `num_heads` are required.
-`warmup_steps=0` disables warmup. Quick presets for small/medium/large model
+`warmup_steps=0` disables warmup. Quick presets for small/medium/large/xl/10B model
 shapes are provided.
 
 ## Features
 
 * Live Plotly graph of step number vs per-step time, with a dashed mean line.
+* An **Export** dropdown in the output toolbar with per-artifact downloads —
+  per-step graph (PNG, panel background baked in), benchmark log, and the
+  Nsight Systems report.
+* **Export all** button that bundles the log, report and graph into a single
+  zip archive downloaded from `POST /api/runs/<id>/export`.
 * Aggregate metric cards: mean, std dev, min, max, median, steps, params,
   duration and exit code.
 * Live logs (stdout + stderr merged) in a secondary panel under the graph, with
@@ -177,6 +182,7 @@ Notes:
 | `POST` | `/api/runs/<id>/stop` | Stop a running benchmark. |
 | `POST` | `/api/runs/<id>/delete` | Delete a run and its log. |
 | `GET` | `/api/runs/<id>/report` | Fetch (over SSH) and download the profiler report. |
+| `POST` | `/api/runs/<id>/export` | Zip the log, profiler report and optional graph PNG; returns the archive. |
 | `POST` | `/api/test-connection` | Probe SSH connectivity (blocking). |
 | `POST` | `/api/sync` | Push the local working tree to the remote dir (blocking). |
 
