@@ -17,7 +17,7 @@ const state = {
 };
 
 const LS_KEY = "cs336-dashboard-connection-v1";
-const LS_PROFILING_KEY = "cs336-dashboard-profiling-v2";
+const LS_PROFILING_KEY = "cs336-dashboard-profiling-v3";
 const REQUIRED = new Set(["d_model", "d_ff", "num_layers", "num_heads"]);
 const ORDER = [
   "d_model", "d_ff", "num_layers", "num_heads", "vocab_size", "context_length", "theta",

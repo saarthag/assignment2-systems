@@ -15,15 +15,23 @@
 #   scripts/uv_sync_no_torch.sh [extra uv sync args...]
 #
 # Env vars:
-#   UV_PROJECT_ENVIRONMENT  uv target env, e.g. /venv/main (inherited by uv)
+#   UV_PROJECT_ENVIRONMENT  uv target env (default: /venv/main, the image's
+#                           pre-existing environment). Override to target another.
 #   UV_SYNC_EXTRA_SKIP      space-separated extra package names to skip
 #
 # Examples:
-#   # preview against the image env
-#   UV_PROJECT_ENVIRONMENT=/venv/main scripts/uv_sync_no_torch.sh --dry-run
+#   # preview against the default image env
+#   scripts/uv_sync_no_torch.sh --dry-run
 #   # sync for real
-#   UV_PROJECT_ENVIRONMENT=/venv/main scripts/uv_sync_no_torch.sh
+#   scripts/uv_sync_no_torch.sh
+#   # target a different environment
+#   UV_PROJECT_ENVIRONMENT=/path/to/env scripts/uv_sync_no_torch.sh
 set -euo pipefail
+
+# Target the image's pre-existing environment by default (Vast.ai ships its
+# PyTorch env at /venv/main). Exported so both uv and the safety check below
+# see it; override by setting UV_PROJECT_ENVIRONMENT before invoking.
+export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/venv/main}"
 
 # Resolve the project root from this script's location (scripts/..) rather than
 # `git rev-parse`: deployed trees are shipped without .git, so git isn't

@@ -68,15 +68,19 @@ SSH_MAX_TIMEOUT = 30
 # the resulting report is pulled back over SSH on demand.
 DEFAULT_PROFILER_CMD = "nsys profile"
 # Assignment-suggested Nsight Systems flags (NVTX/PyTorch annotations, CUDA and
-# Python backtraces, GPU metrics), plus --force-overwrite true so a re-run never
-# blocks on nsys' interactive overwrite prompt over BatchMode SSH.
+# Python backtraces, GPU metrics). We additionally force overwrite (so a re-run
+# never blocks on nsys' interactive prompt over BatchMode SSH) and disable the
+# host-side perf collectors (`--sample=none --cpuctxsw=none`), which cannot be
+# enabled inside an unprivileged Vast.ai/Docker container and only add noise.
 DEFAULT_PROFILER_ARGS = (
     "--force-overwrite true "
     "--trace=cuda,cudnn,cublas,osrt,nvtx "
     "--pytorch=functions-trace,autograd-shapes-nvtx "
     "--cudabacktrace=all "
     "--python-backtrace=cuda "
-    "--gpu-metrics-devices=0"
+    "--gpu-metrics-devices=0 "
+    "--sample=none "
+    "--cpuctxsw=none"
 )
 DEFAULT_PROFILER_DIR = "profiles"
 
@@ -102,7 +106,7 @@ CONNECTION_FIELDS: list[dict[str, Any]] = [
 PROFILING_FIELDS: list[dict[str, Any]] = [
     {"name": "enabled", "label": "Profile with Nsight Systems (nsys)", "type": "bool", "default": False, "help": "Wrap the benchmark command in the profiler and write a report on the instance for download."},
     {"name": "profiler_cmd", "label": "Profiler command", "type": "str", "default": DEFAULT_PROFILER_CMD, "placeholder": DEFAULT_PROFILER_CMD, "help": "Wrapper prepended to the benchmark command. `nsys profile` for Nsight Systems, or `ncu` for Nsight Compute."},
-    {"name": "profiler_args", "label": "Profiler args", "type": "str", "default": DEFAULT_PROFILER_ARGS, "placeholder": DEFAULT_PROFILER_ARGS, "help": "Extra profiler flags. Defaults to the assignment-suggested nsys flags (NVTX/PyTorch annotations, CUDA + Python backtraces, GPU metrics). `-o <report>` is appended automatically."},
+    {"name": "profiler_args", "label": "Profiler args", "type": "str", "default": DEFAULT_PROFILER_ARGS, "placeholder": DEFAULT_PROFILER_ARGS, "help": "Extra profiler flags. Defaults to the assignment-suggested nsys flags plus --sample=none --cpuctxsw=none (the host-side perf collectors can't run in an unprivileged container). `-o <report>` is appended automatically."},
     {"name": "report_dir", "label": "Remote report dir", "type": "str", "default": DEFAULT_PROFILER_DIR, "placeholder": DEFAULT_PROFILER_DIR, "help": "Where the report is written on the instance (relative to the remote dir, or absolute)."},
 ]
 

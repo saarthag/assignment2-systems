@@ -184,7 +184,7 @@ wheels = [
 [[package]]
 name = "cs336-basics"
 version = "26.0.0"
-source = { editable = "../assignment1-basics" }
+source = { git = "https://github.com/saarthag/assignment1-basics.git?rev=main#58b5c4ac2892a924fe24ff8902a518f6cc095ff3" }
 dependencies = [
     { name = "boto3" },
     { name = "einops" },
@@ -203,38 +203,6 @@ dependencies = [
     { name = "tqdm" },
     { name = "ty" },
     { name = "wandb" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3", specifier = ">=1.43.108" },
-    { name = "einops", specifier = ">=0.8" },
-    { name = "einx", specifier = ">=0.4" },
-    { name = "jaxtyping", specifier = ">=0.3" },
-    { name = "numpy", specifier = ">=2.4" },
-    { name = "plotly", specifier = ">=7.1.0" },
-    { name = "psutil", specifier = ">=7" },
-    { name = "pytest", specifier = ">=9.0" },
-    { name = "pytest-timeout" },
-    { name = "regex", specifier = ">=2026.3.32" },
-    { name = "rich", specifier = ">=15.0.0" },
-    { name = "ruff", specifier = ">=0.15.8" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "torch", specifier = "~=2.11.0" },
-    { name = "tqdm", specifier = ">=4.67" },
-    { name = "ty", specifier = ">=0.0.26" },
-    { name = "wandb", specifier = ">=0.25" },
-]
-
-[package.metadata.requires-dev]
-agent = [{ name = "pypdf", specifier = ">=6.19.0" }]
-dev = [
-    { name = "humanize", specifier = ">=4.16.0" },
-    { name = "jupyter", specifier = ">=1.1.1" },
-    { name = "jupytext", specifier = ">=1.19.5" },
-    { name = "prek", specifier = ">=0.5.2" },
-    { name = "py-spy", specifier = ">=0.4.2" },
-    { name = "quantiphy", specifier = ">=2.23" },
 ]
 
 [[package]]
@@ -267,7 +235,7 @@ dashboard = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cs336-basics", editable = "../assignment1-basics" },
+    { name = "cs336-basics", git = "https://github.com/saarthag/assignment1-basics.git?rev=main" },
     { name = "humanfriendly" },
     { name = "humanize", specifier = ">=4.16.0" },
     { name = "matplotlib" },
