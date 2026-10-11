@@ -5,8 +5,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import torch.nn as nn
-import torch.optim as optim
+from torch import nn, optim
 
 from .adapters import (
     ddp_on_after_backward,

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import io
 import json
 import os
@@ -47,12 +48,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import uvicorn  # noqa: E402
-from fastapi import FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import FileResponse, Response  # noqa: E402
-from fastapi.staticfiles import StaticFiles  # noqa: E402
-from pydantic import BaseModel, Field, create_model  # noqa: E402
-from schema import extract_cli_schema  # noqa: E402
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, create_model
+from schema import extract_cli_schema
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 RUNS_DIR = Path(__file__).resolve().parent / ".runs"
@@ -77,17 +78,21 @@ SSH_MAX_TIMEOUT = 30
 # the resulting report is pulled back over SSH on demand.
 DEFAULT_PROFILER_CMD = "nsys profile"
 # Assignment-suggested Nsight Systems flags (NVTX/PyTorch annotations, CUDA and
-# Python backtraces, GPU metrics). We additionally force overwrite (so a re-run
-# never blocks on nsys' interactive prompt over BatchMode SSH) and disable the
-# host-side perf collectors (`--sample=none --cpuctxsw=none`), which cannot be
-# enabled inside an unprivileged Vast.ai/Docker container and only add noise.
+# Python backtraces). We additionally force overwrite (so a re-run never blocks
+# on nsys' interactive prompt over BatchMode SSH) and disable the host-side perf
+# collectors (`--sample=none --cpuctxsw=none`), which cannot be enabled inside an
+# unprivileged Vast.ai/Docker container and only add noise.
+#
+# ``--gpu-metrics-devices=0`` is intentionally omitted. On hosts whose driver
+# restricts profiling to admin users (`NVreg_RestrictProfilingToAdminUsers`, e.g.
+# many Vast.ai RTX 50xx instances) nsys exits 1 with ``ERR_NVGPUCTRPERM`` and
+# aborts the whole run. Add it back per-run only where GPU metrics are allowed.
 DEFAULT_PROFILER_ARGS = (
     "--force-overwrite true "
     "--trace=cuda,cudnn,cublas,osrt,nvtx "
     "--pytorch=functions-trace,autograd-shapes-nvtx "
     "--cudabacktrace=all "
     "--python-backtrace=cuda "
-    "--gpu-metrics-devices=0 "
     "--sample=none "
     "--cpuctxsw=none"
 )
@@ -101,11 +106,48 @@ CONNECTION_FIELDS: list[dict[str, Any]] = [
     {"name": "host", "label": "Hostname", "type": "str", "default": "", "placeholder": "ssh4.vast.ai", "help": "Vast.ai instance host (the part before :port)."},
     {"name": "port", "label": "SSH port", "type": "int", "default": 22, "placeholder": "12345", "help": "Mapped SSH port for the instance."},
     {"name": "user", "label": "User", "type": "str", "default": "root", "placeholder": "root", "help": "Remote user."},
-    {"name": "ssh_key", "label": "SSH key", "type": "str", "default": "", "placeholder": "~/.ssh/id_ed25519", "help": "Optional identity file. Blank uses your ssh config / agent."},
-    {"name": "remote_dir", "label": "Remote dir", "type": "str", "default": DEFAULT_REMOTE_DIR, "placeholder": DEFAULT_REMOTE_DIR, "help": "Directory containing the assignment2 tree on the instance."},
-    {"name": "env_path", "label": "Remote uv env", "type": "str", "default": DEFAULT_ENV_PATH, "placeholder": DEFAULT_ENV_PATH, "help": "Exported as UV_PROJECT_ENVIRONMENT on the instance (before setup + benchmark). Vast.ai PyTorch images use /venv/main, which keeps the preinstalled torch/CUDA stack."},
-    {"name": "bench_cmd", "label": "Benchmark command", "type": "str", "default": DEFAULT_BENCH_CMD, "placeholder": DEFAULT_BENCH_CMD, "help": "Runs inside the remote dir. `--no-sync` guarantees uv will not reinstall dependencies. The per-step timing checkbox appends --per-step-timing to this command."},
-    {"name": "setup_cmd", "label": "Setup command", "type": "str", "default": DEFAULT_SETUP_CMD, "placeholder": DEFAULT_SETUP_CMD, "help": "Run before every benchmark. Defaults to uv_sync_no_torch.sh, which skips torch/triton/cuda/nvidia and never prunes the image env."},
+    {
+        "name": "ssh_key",
+        "label": "SSH key",
+        "type": "str",
+        "default": "",
+        "placeholder": "~/.ssh/id_ed25519",
+        "help": "Optional identity file. Blank uses your ssh config / agent.",
+    },
+    {
+        "name": "remote_dir",
+        "label": "Remote dir",
+        "type": "str",
+        "default": DEFAULT_REMOTE_DIR,
+        "placeholder": DEFAULT_REMOTE_DIR,
+        "help": "Directory containing the assignment2 tree on the instance.",
+    },
+    {
+        "name": "env_path",
+        "label": "Remote uv env",
+        "type": "str",
+        "default": DEFAULT_ENV_PATH,
+        "placeholder": DEFAULT_ENV_PATH,
+        "help": (
+            "Exported as UV_PROJECT_ENVIRONMENT on the instance (before setup + benchmark). Vast.ai PyTorch images use /venv/main, which keeps the preinstalled torch/CUDA stack."
+        ),
+    },
+    {
+        "name": "bench_cmd",
+        "label": "Benchmark command",
+        "type": "str",
+        "default": DEFAULT_BENCH_CMD,
+        "placeholder": DEFAULT_BENCH_CMD,
+        "help": "Runs inside the remote dir. `--no-sync` guarantees uv will not reinstall dependencies. The per-step timing checkbox appends --per-step-timing to this command.",
+    },
+    {
+        "name": "setup_cmd",
+        "label": "Setup command",
+        "type": "str",
+        "default": DEFAULT_SETUP_CMD,
+        "placeholder": DEFAULT_SETUP_CMD,
+        "help": "Run before every benchmark. Defaults to uv_sync_no_torch.sh, which skips torch/triton/cuda/nvidia and never prunes the image env.",
+    },
     {"name": "extra_args", "label": "Extra CLI args", "type": "str", "default": "", "placeholder": "--batch-size 8", "help": "Raw extra flags appended to the benchmark command."},
     {"name": "batch_mode", "label": "Non-interactive SSH", "type": "bool", "default": True, "help": "Adds -o BatchMode=yes so SSH never hangs waiting for a password."},
 ]
@@ -113,10 +155,41 @@ CONNECTION_FIELDS: list[dict[str, Any]] = [
 # Profiler settings. These are not part of the benchmark CLI; they control how
 # the remote command is wrapped and where the report is written.
 PROFILING_FIELDS: list[dict[str, Any]] = [
-    {"name": "enabled", "label": "Profile with Nsight Systems (nsys)", "type": "bool", "default": False, "help": "Wrap the benchmark command in the profiler and write a report on the instance for download."},
-    {"name": "profiler_cmd", "label": "Profiler command", "type": "str", "default": DEFAULT_PROFILER_CMD, "placeholder": DEFAULT_PROFILER_CMD, "help": "Wrapper prepended to the benchmark command. `nsys profile` for Nsight Systems, or `ncu` for Nsight Compute."},
-    {"name": "profiler_args", "label": "Profiler args", "type": "str", "default": DEFAULT_PROFILER_ARGS, "placeholder": DEFAULT_PROFILER_ARGS, "help": "Extra profiler flags. Defaults to the assignment-suggested nsys flags plus --sample=none --cpuctxsw=none (the host-side perf collectors can't run in an unprivileged container). `-o <report>` is appended automatically."},
-    {"name": "report_dir", "label": "Remote report dir", "type": "str", "default": DEFAULT_PROFILER_DIR, "placeholder": DEFAULT_PROFILER_DIR, "help": "Where the report is written on the instance (relative to the remote dir, or absolute)."},
+    {
+        "name": "enabled",
+        "label": "Profile with Nsight Systems (nsys)",
+        "type": "bool",
+        "default": False,
+        "help": "Wrap the benchmark command in the profiler and write a report on the instance for download.",
+    },
+    {
+        "name": "profiler_cmd",
+        "label": "Profiler command",
+        "type": "str",
+        "default": DEFAULT_PROFILER_CMD,
+        "placeholder": DEFAULT_PROFILER_CMD,
+        "help": "Wrapper prepended to the benchmark command. `nsys profile` for Nsight Systems, or `ncu` for Nsight Compute.",
+    },
+    {
+        "name": "profiler_args",
+        "label": "Profiler args",
+        "type": "str",
+        "default": DEFAULT_PROFILER_ARGS,
+        "placeholder": DEFAULT_PROFILER_ARGS,
+        "help": (
+            "Extra profiler flags. Defaults to the assignment-suggested nsys flags plus --sample=none "
+            "--cpuctxsw=none (the host-side perf collectors can't run in an unprivileged container). "
+            "`-o <report>` is appended automatically."
+        ),
+    },
+    {
+        "name": "report_dir",
+        "label": "Remote report dir",
+        "type": "str",
+        "default": DEFAULT_PROFILER_DIR,
+        "placeholder": DEFAULT_PROFILER_DIR,
+        "help": "Where the report is written on the instance (relative to the remote dir, or absolute).",
+    },
 ]
 
 MODEL_FIELDS = {"d_model", "d_ff", "num_layers", "num_heads"}
@@ -298,7 +371,7 @@ class Run:
         if raw.startswith("{"):
             try:
                 event = json.loads(raw)
-            except Exception:
+            except json.JSONDecodeError:
                 event = None
             if isinstance(event, dict) and event.get("event") == "step":
                 step_no = int(event.get("step", 0))
@@ -306,10 +379,7 @@ class Run:
                 return f"step {step_no}: {ms:.3f} ms", {"step": step_no, "ms": ms}, None
             if isinstance(event, dict) and event.get("event") == "summary":
                 summary = {k: v for k, v in event.items() if k != "event"}
-                display = (
-                    f"summary: mean={summary.get('mean_ms', 0.0):.3f} ms  "
-                    f"std={summary.get('std_ms', 0.0):.3f} ms  (n={summary.get('steps', 0)})"
-                )
+                display = f"summary: mean={summary.get('mean_ms', 0.0):.3f} ms  std={summary.get('std_ms', 0.0):.3f} ms  (n={summary.get('steps', 0)})"
                 return display, None, summary
         match = _STEP_DISPLAY.match(raw)
         if match:
@@ -383,10 +453,8 @@ class Run:
         (self._dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(OSError):
             self._log_fh.close()
-        except Exception:
-            pass
 
     # -- profiler report -----------------------------------------------
     def report_local_path(self) -> Path:
@@ -409,16 +477,12 @@ class Run:
         if local.exists() and local.stat().st_size > 0:
             return True, None
         remote_dir = str(self.connection.get("remote_dir") or DEFAULT_REMOTE_DIR)
-        remote = (
-            f"cd {shlex.quote(remote_dir)}"
-            f" && test -f {shlex.quote(self.report_path)}"
-            f" && cat {shlex.quote(self.report_path)}"
-        )
+        remote = f"cd {shlex.quote(remote_dir)} && test -f {shlex.quote(self.report_path)} && cat {shlex.quote(self.report_path)}"
         argv = build_ssh_argv(self.connection, remote)
         self.ingest(f"[dashboard] fetching profiler report: {self.report_path}")
         try:
             with local.open("wb") as fh:
-                proc = subprocess.run(argv, stdout=fh, stderr=subprocess.PIPE)
+                proc = subprocess.run(argv, stdout=fh, stderr=subprocess.PIPE, check=False)
         except FileNotFoundError:
             return False, "ssh executable not found on PATH"
         if proc.returncode != 0:
@@ -437,7 +501,7 @@ class Run:
             return None
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             return None
         run = cls(
             run_dir.name,
@@ -464,7 +528,7 @@ class Run:
             for line in log_path.read_text(encoding="utf-8").splitlines():
                 try:
                     entry = json.loads(line)
-                except Exception:
+                except json.JSONDecodeError:
                     entry = {"t": 0, "text": line}
                 raw = entry.get("text", "")
                 _, metric, _ = run._ingest(raw)
@@ -600,10 +664,8 @@ class Runner:
             return
         run.status = "stopping"
         run.ingest("[dashboard] stopping...")
-        try:
+        with contextlib.suppress(OSError):
             proc.send_signal(signal.SIGINT)
-        except Exception:
-            pass
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -617,7 +679,7 @@ try:
     import plotly
 
     PLOTLY_JS = Path(plotly.__file__).resolve().parent / "package_data" / "plotly.min.js"
-except Exception:  # pragma: no cover - plotly is an optional dashboard dep
+except (ImportError, AttributeError, TypeError):  # pragma: no cover - plotly is an optional dashboard dep
     PLOTLY_JS = None
 
 
@@ -632,14 +694,16 @@ def probe_connection(connection: dict[str, Any]) -> dict[str, Any]:
         " && (uv --version 2>/dev/null || echo 'uv: missing')"
         " && (nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'nvidia-smi: unavailable')"
         f" && (test -x {shlex.quote(env_path)}/bin/python && echo 'env: {env_path}' || echo 'env: {env_path} MISSING')"
-        f" && ({shlex.quote(env_path)}/bin/python -c \"import torch; print('torch:', torch.__version__, 'cuda:', torch.cuda.is_available())\" 2>/dev/null || echo 'torch: not importable from {env_path}')"
+        f" && ({shlex.quote(env_path)}/bin/python -c \"import torch; print('torch:', torch.__version__, 'cuda:', torch.cuda.is_available())\""
+        f" 2>/dev/null || echo 'torch: not importable from {env_path}')"
         f" && (cd {shlex.quote(remote_dir)} 2>/dev/null && test -f scripts/uv_sync_no_torch.sh && echo 'no-torch sync script: present' || echo 'no-torch sync script: MISSING')"
-        f" && (cd {shlex.quote(remote_dir)} 2>/dev/null && grep -q 'per-step-timing' cs336_systems/benchmark.py && echo 'per-step timing: present' || echo 'per-step timing: MISSING (redeploy assignment2)')"
+        f" && (cd {shlex.quote(remote_dir)} 2>/dev/null && grep -q 'per-step-timing' cs336_systems/benchmark.py"
+        f" && echo 'per-step timing: present' || echo 'per-step timing: MISSING (redeploy assignment2)')"
         f" && (test -d {shlex.quote(remote_dir)} && echo 'dir: present' || echo 'dir: MISSING ({remote_dir})')"
     )
     argv = build_ssh_argv(connection, probe)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=SSH_MAX_TIMEOUT)
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=SSH_MAX_TIMEOUT, check=False)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"timed out after {SSH_MAX_TIMEOUT}s", "command": _display_ssh(argv)}
     except FileNotFoundError:
@@ -675,6 +739,7 @@ def sync_to_remote(connection: dict[str, Any]) -> dict[str, Any]:
             cwd=LOCAL_REPO_ROOT,
             capture_output=True,
             text=True,
+            check=False,
         )
     except FileNotFoundError:
         return {"ok": False, "error": "git executable not found on PATH (server host)"}
@@ -698,6 +763,7 @@ def sync_to_remote(connection: dict[str, Any]) -> dict[str, Any]:
                 cwd=LOCAL_REPO_ROOT,
                 capture_output=True,
                 text=True,
+                check=False,
             )
         except FileNotFoundError:
             return {"ok": False, "error": "bash executable not found on PATH"}

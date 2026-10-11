@@ -137,7 +137,7 @@ mkdir -p "profiles" && bash scripts/uv_sync_no_torch.sh \
   && exec nsys profile --force-overwrite true \
        --trace=cuda,cudnn,cublas,osrt,nvtx \
        --pytorch=functions-trace,autograd-shapes-nvtx \
-       --cudabacktrace=all --python-backtrace=cuda --gpu-metrics-devices=0 \
+       --cudabacktrace=all --python-backtrace=cuda \
        --sample=none --cpuctxsw=none \
        -o profiles/<run-id> \
        uv run --no-sync python -m cs336_systems.benchmark --per-step-timing <args...>
@@ -149,7 +149,7 @@ Notes:
   profile kernels instead. The report extension follows the tool
   (`.nsys-rep` / `.ncu-rep`).
 * `profiler_args` defaults to the assignment-suggested nsys flags above
-  (NVTX/PyTorch annotations, CUDA + Python backtraces, GPU metrics) plus
+  (NVTX/PyTorch annotations, CUDA + Python backtraces) plus
   `--force-overwrite true`. The `-o <report>` path is appended automatically.
   Edit the field to change them, or clear it for a bare `nsys profile`.
 * `--sample=none --cpuctxsw=none` disable nsys' host-side perf collectors. These
@@ -157,8 +157,12 @@ Notes:
   which cannot be enabled from inside an unprivileged Vast.ai/Docker container,
   so leaving them on only produces the `Unable to configure CPU IP/backtrace
   samples …` diagnostic. GPU tracing, NVTX and CUDA backtraces are unaffected.
-* `--gpu-metrics-devices=0` requires the container to be allowed to collect GPU
-  metrics; if it is not, nsys logs a warning but the CUDA trace still records.
+* `--gpu-metrics-devices=0` is **not** part of the default. On hosts whose
+  driver restricts profiling to admin users (`NVreg_RestrictProfilingToAdminUsers`,
+  common on Vast.ai RTX 50xx instances) nsys exits 1 with `ERR_NVGPUCTRPERM`,
+  aborting the entire run — not just skipping the GPU metrics. Add the flag back
+  in the **Profiler args** field only on hosts where GPU metrics collection is
+  permitted.
 * Profiling settings (including the args) are persisted per browser. After
   upgrading the defaults, clear the dashboard's local storage (or hard-reload /
   use a private window) to pick up the new flags.

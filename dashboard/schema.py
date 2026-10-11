@@ -23,7 +23,7 @@ _TYPE_NAMES = {"int": "int", "float": "float", "str": "str"}
 def _literal(node: ast.AST) -> Any:
     try:
         return ast.literal_eval(node)
-    except Exception:  # pragma: no cover - defensive
+    except (ValueError, SyntaxError, TypeError):  # pragma: no cover - defensive
         return None
 
 
@@ -84,11 +84,7 @@ def extract_cli_schema(path: Path = BENCHMARK_PATH) -> list[dict[str, Any]]:
         if isinstance(node, ast.FunctionDef) and node.name == "parse_args":
             entries: list[dict[str, Any]] = []
             for child in ast.walk(node):
-                if (
-                    isinstance(child, ast.Call)
-                    and isinstance(child.func, ast.Attribute)
-                    and child.func.attr == "add_argument"
-                ):
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "add_argument":
                     parsed = _parse_add_argument(child)
                     if parsed:
                         entries.append(parsed)

@@ -5,7 +5,7 @@ import pathlib
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
+from torch import nn
 
 FIXTURES_PATH = (pathlib.Path(__file__).resolve().parent) / "fixtures"
 

@@ -1,20 +1,17 @@
-from typing import TypeVar
+import os
+import pickle
+from pathlib import Path
+
 import numpy as np
 import pytest
-import os
-from pathlib import Path
-import torch
 from torch import Tensor
-import pickle
 
 
 def pytest_addoption(parser):
     parser.addoption("--snapshot-exact", action="store_true", help="Use exact matching standards for snapshot matching")
 
-_A = TypeVar("_A", np.ndarray, Tensor)
 
-
-def _canonicalize_array(arr: _A) -> np.ndarray:
+def _canonicalize_array[A: (np.ndarray, Tensor)](arr: A) -> np.ndarray:
     if isinstance(arr, Tensor):
         arr = arr.detach().cpu().numpy()
     return arr
@@ -34,9 +31,9 @@ class NumpySnapshot:
         """Get the path to the snapshot file."""
         return self.snapshot_dir / f"{test_name}.npz"
 
-    def assert_match(
+    def assert_match[A: (np.ndarray, Tensor)](
         self,
-        actual: _A | dict[str, _A],
+        actual: A | dict[str, A],
         test_name: str,
         force_update: bool = False,
         rtol: float = 1e-4,
@@ -55,7 +52,6 @@ class NumpySnapshot:
         # Convert single array to dictionary for consistent handling
         arrays_dict = actual if isinstance(actual, dict) else {"array": actual}
         arrays_dict = {k: _canonicalize_array(v) for k, v in arrays_dict.items()}
-
 
         # Load the snapshot
         expected_arrays = dict(np.load(snapshot_path))
@@ -92,9 +88,9 @@ class Snapshot:
     def _get_snapshot_path(self, test_name: str) -> Path:
         return self.snapshot_dir / f"{test_name}.pkl"
 
-    def assert_match(
+    def assert_match[A: (np.ndarray, Tensor)](
         self,
-        actual: _A | dict[str, _A],
+        actual: A | dict[str, A],
         test_name: str,
         force_update: bool = False,
     ):
@@ -107,7 +103,6 @@ class Snapshot:
         """
 
         snapshot_path = self._get_snapshot_path(test_name)
-
 
         # Load the snapshot
         with open(snapshot_path, "rb") as f:

@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import torch.nn as nn
+from torch import nn
 
 from .adapters import (
     fsdp_gather_full_params,

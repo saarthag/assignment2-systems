@@ -1,20 +1,45 @@
 import argparse
 import json
 import logging
+import math
 import shlex
 import statistics
+import timeit
 from functools import partial
 from typing import Any
-import timeit
 
+import cs336_basics.transformer
 import humanize
 import torch
 import torch.nn.functional as F
+from cs336_basics.transformer import AdamW, TransformerLM, my_softmax
+from einops import einsum
+from jaxtyping import Bool, Float
 from pydantic import BaseModel
-
-from cs336_basics.transformer import TransformerLM, AdamW
+from torch import Tensor
+from torch.cuda import nvtx
 
 logger = logging.getLogger(__name__)
+
+
+@nvtx.range("sdpa")
+def annotated_scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys d_k"],
+    V: Float[Tensor, " ... keys d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    d_k = Q.shape[-1]
+    with nvtx.range("computing attention scores"):
+        sdp = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys") / math.sqrt(d_k)
+
+    with nvtx.range("applying causal mask"):
+        pre_softmax = sdp.masked_fill(~mask, -torch.inf) if mask is not None else sdp
+
+    with nvtx.range("computing softmax"):
+        out = einsum(my_softmax(pre_softmax, dim=-1), V, "... queries keys, ... keys d_v -> ... queries d_v")
+
+    return out
 
 
 class TransformerLMConfig(BaseModel):
@@ -156,6 +181,22 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # Swap in the NVTX-annotated SDPA implementation when NVTX is available. The annotated version
+    # wraps the attention computation in NVTX ranges; torch gates that support on torch._C._nvtx
+    # (which raises on first use when missing), so key off the same symbol the wrapper does.
+    if hasattr(torch._C, "_nvtx"):
+        cs336_basics.transformer.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+        logger.info(
+            "Swapped cs336_basics.transformer.scaled_dot_product_attention for annotated_scaled_dot_product_attention (CUDA %s, NVTX ranges enabled).",
+            torch.version.cuda,
+        )
+    else:
+        logger.warning(
+            "PyTorch was built without NVTX (torch._C._nvtx is missing); skipping swap to "
+            "annotated_scaled_dot_product_attention. NVTX ranges will not be emitted and the "
+            "original cs336_basics.transformer.scaled_dot_product_attention will be benchmarked."
+        )
 
     # Merge CLI values on top of the pydantic defaults (unset args are None).
     values = {name: value for name in TransformerLMConfig.model_fields if (value := getattr(args, name, None)) is not None}
