@@ -8,13 +8,21 @@ step number vs per-step time with aggregate mean / std-dev metrics.
 The backend is [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn, and it shells
 out to the system `ssh` client — the same approach as `scripts/deploy_code.sh`.
 Dashboard dependencies live in their own `dashboard` uv dependency group, so the
-assignment environment is unaffected.
+assignment environment is unaffected; the `make dashboard` target syncs them on
+demand.
 
 ## Quick start
 
 ```sh
 # from the repo root
-uv run --group dashboard python dashboard/server.py            # http://127.0.0.1:8765
+make dashboard                                    # http://127.0.0.1:8765
+make dashboard DASHBOARD_PORT=9000 DASHBOARD_HOST=0.0.0.0
+```
+
+`make dashboard` runs `uv run --group dashboard python dashboard/server.py`, so
+the dashboard group is synced on demand. The equivalent raw command is:
+
+```sh
 uv run --group dashboard python dashboard/server.py --port 9000 --host 0.0.0.0
 ```
 
@@ -106,6 +114,10 @@ shapes are provided.
   availability, the no-torch sync script and whether the per-step flag is
   deployed.
 * Stop, download-log, delete-run and command preview.
+* **Sync to remote**: push the local working tree (tracked + untracked-not-ignored,
+  including uncommitted edits) to the instance's remote dir over SSH, the same
+  way `scripts/deploy_code.sh` does — handy for iterating without a manual
+  `make deploy`.
 * Optional Nsight Systems / Nsight Compute profiling wrapper with on-demand
   report download (see **Profiling** below).
 
@@ -147,10 +159,10 @@ Notes:
   use a private window) to pick up the new flags.
 * `report_dir` defaults to `profiles/` under the remote assignment directory and
   is created automatically. The report is named after the run id.
-* Once a profiled run finishes, a **download report** button appears next to
-  **download** in the output toolbar. Clicking it pulls the report from the
-  instance over SSH on the machine running `server.py` (cached in
-  `dashboard/.runs/<id>/`), then serves it to the browser.
+* Once a profiled run finishes, a **Download nsys report** button (with the
+  NVIDIA logomark) appears next to **download** in the output toolbar. Clicking
+  it pulls the report from the instance over SSH on the machine running
+  `server.py` (cached in `dashboard/.runs/<id>/`), then serves it to the browser.
 * If `nsys`/`ncu` is not installed or not on `PATH`, the run fails with the
   profiler's error in the log panel.
 
@@ -166,6 +178,7 @@ Notes:
 | `POST` | `/api/runs/<id>/delete` | Delete a run and its log. |
 | `GET` | `/api/runs/<id>/report` | Fetch (over SSH) and download the profiler report. |
 | `POST` | `/api/test-connection` | Probe SSH connectivity (blocking). |
+| `POST` | `/api/sync` | Push the local working tree to the remote dir (blocking). |
 
 ## Files
 
@@ -176,7 +189,8 @@ dashboard/
 ├── static/
 │   ├── index.html
 │   ├── style.css
-│   └── app.js
+│   ├── app.js
+│   └── nvidia-logo.png  # NVIDIA logomark (from the NVIDIA newsroom logo album)
 ├── README.md
 └── .runs/             # persisted run metadata + logs (gitignored)
 ```

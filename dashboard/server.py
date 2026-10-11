@@ -22,6 +22,7 @@ HTTP API (see ``dashboard/README.md`` for details):
 * ``POST /api/runs/<id>/delete``    -> remove a run
 * ``GET  /api/runs/<id>/report``    -> fetch + download the profiler report
 * ``POST /api/test-connection``     -> probe ssh connectivity (blocking)
+* ``POST /api/sync``                -> push the local working tree to the remote dir
 """
 
 from __future__ import annotations
@@ -51,6 +52,10 @@ from schema import extract_cli_schema  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 RUNS_DIR = Path(__file__).resolve().parent / ".runs"
+# The dashboard lives inside the assignment2 repo, so its parent is the tree
+# that ``Sync to remote`` ships (mirrors scripts/deploy_code.sh).
+LOCAL_REPO_ROOT = Path(__file__).resolve().parent.parent
+SYNC_LOCK = threading.Lock()
 DEFAULT_REMOTE_DIR = "/workspace/assignment2"
 # Vast.ai's PyTorch image ships a working torch/CUDA stack in /venv/main. We
 # reuse it instead of letting uv download the multi-GB torch wheels:
@@ -639,6 +644,67 @@ def probe_connection(connection: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def sync_to_remote(connection: dict[str, Any]) -> dict[str, Any]:
+    """Ship the local working tree to the remote dir over SSH.
+
+    Mirrors ``scripts/deploy_code.sh``: the file list comes from ``git ls-files
+    -co --exclude-standard`` (tracked plus untracked-but-not-ignored, so
+    uncommitted edits and new files are included) and is piped through tar into
+    ``ssh`` where the archive is extracted under the remote dir. The SSH options
+    are the same ones the benchmark and probe use, including BatchMode.
+    """
+    host = str(connection.get("host") or "").strip()
+    if not host:
+        return {"ok": False, "error": "hostname is required"}
+    remote_dir = str(connection.get("remote_dir") or DEFAULT_REMOTE_DIR)
+
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files", "-co", "--exclude-standard"],
+            cwd=LOCAL_REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "error": "git executable not found on PATH (server host)"}
+    if listing.returncode != 0:
+        detail = (listing.stderr or "").strip()
+        return {"ok": False, "error": detail or "git ls-files failed"}
+    files = [line for line in listing.stdout.splitlines() if line]
+    if not files:
+        return {"ok": False, "error": "nothing to sync (git ls-files returned no files)"}
+
+    remote_cmd = f"mkdir -p {shlex.quote(remote_dir)} && tar -xzf - -C {shlex.quote(remote_dir)}"
+    argv = build_ssh_argv(connection, remote_cmd)
+    # Pipe the packed tree straight into ssh; bash handles the pipeline so the
+    # archive is never buffered in memory. Exit status is the remote tar's.
+    pipeline = "git ls-files -co --exclude-standard -z | tar --null -T - -czf - | " + shlex.join(argv)
+    started = time.time()
+    with SYNC_LOCK:
+        try:
+            proc = subprocess.run(
+                ["bash", "-c", pipeline],
+                cwd=LOCAL_REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return {"ok": False, "error": "bash executable not found on PATH"}
+    duration = time.time() - started
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    ok = proc.returncode == 0
+    return {
+        "ok": ok,
+        "files": len(files),
+        "remote_dir": remote_dir,
+        "duration": round(duration, 2),
+        "exit_code": proc.returncode,
+        "output": output,
+        "error": None if ok else f"sync failed (exit code {proc.returncode})",
+        "command": _display_ssh(argv),
+    }
+
+
 app = FastAPI(title="CS336 Benchmark Dashboard", docs_url=None, redoc_url=None)
 
 
@@ -719,6 +785,11 @@ def api_download_report(run_id: str) -> FileResponse:
 @app.post("/api/test-connection")
 def api_test_connection(req: ConnectionRequest) -> dict[str, Any]:
     return probe_connection(req.connection.model_dump())
+
+
+@app.post("/api/sync")
+def api_sync(req: ConnectionRequest) -> dict[str, Any]:
+    return sync_to_remote(req.connection.model_dump())
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

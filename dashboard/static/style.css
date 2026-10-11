@@ -48,6 +48,7 @@ code { font-family: var(--mono); font-size: 0.9em; }
 }
 .topbar h1 { font-size: 16px; margin: 0; letter-spacing: 0.2px; }
 .subtitle { margin: 2px 0 0; color: var(--text-dim); font-size: 12px; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
 
 .layout {
   display: grid;
@@ -88,6 +89,8 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .field label { font-size: 12px; color: var(--text); display: flex; align-items: center; gap: 6px; }
 .field .req { color: var(--red); }
 .field .hint { font-size: 11px; color: var(--text-dim); line-height: 1.35; }
+.field.disabled { opacity: 0.45; }
+.field.disabled label { cursor: not-allowed; }
 .field input, .field select, .field textarea {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -135,7 +138,14 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .btn.danger { background: #3a1d1f; border-color: #6b2b2f; color: #ff9d97; }
 .btn.danger:hover:not(:disabled) { background: #4a2427; }
 .btn.ghost { background: transparent; }
-.btn.tiny { padding: 5px 9px; font-size: 12px; font-weight: 500; }
+.btn.tiny { padding: 5px 9px; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+.btn-icon { width: 14px; height: 14px; display: block; flex: none; }
+.btn-spinner {
+  width: 14px; height: 14px; flex: none; display: block;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; animation: btn-spin 0.7s linear infinite;
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
 .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0; }
 
 .run-actions { display: flex; gap: 10px; padding-top: 14px; position: sticky; bottom: -16px; background: linear-gradient(180deg, transparent, var(--panel) 30%); padding-bottom: 4px; }

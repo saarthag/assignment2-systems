@@ -17,6 +17,14 @@
       </div>
     </div>
     <div class="topbar-actions">
+      <button type="button" id="sync-remote" class="btn tiny ghost" title="Push local changes to the remote over SSH">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><!-- lucide: upload -->
+          <path d="M12 3v12" />
+          <path d="m17 8-5-5-5 5" />
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        </svg>
+        <span class="btn-label">Sync to remote</span>
+      </button>
       <span id="conn-status" class="pill muted">not connected</span>
     </div>
   </header>
@@ -74,7 +82,11 @@
         <div class="output-tools">
           <label class="checkbox"><input type="checkbox" id="follow-log" checked /> follow logs</label>
           <button type="button" id="download-log" class="btn tiny ghost">download</button>
-          <button type="button" id="download-report" class="btn tiny ghost hidden">download report</button>
+          <button type="button" id="download-report" class="btn tiny ghost hidden" title="Download the Nsight Systems report">
+            <img class="btn-icon" src="/static/nvidia-logo.png" alt="" aria-hidden="true" />
+            <span class="btn-spinner hidden" aria-hidden="true"></span>
+            <span class="btn-label">Download nsys report</span>
+          </button>
           <button type="button" id="clear-view" class="btn tiny ghost">clear view</button>
         </div>
       </div>

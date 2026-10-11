@@ -208,6 +208,7 @@ function renderProfilingFields() {
   const container = $("#profiling-fields");
   if (!container) return;
   container.innerHTML = "";
+  const enabled = !!state.profiling.enabled;
   for (const field of state.schema.profiling || []) {
     const wide = LONG_TEXT.has(field.name);
     const wrap = el("div", "field" + (wide ? " wide" : ""));
@@ -222,6 +223,8 @@ function renderProfilingFields() {
       input.addEventListener("change", () => {
         state.profiling[field.name] = input.checked;
         persistProfiling();
+        // The profiler command/args/dir only apply while profiling is on.
+        renderProfilingFields();
         updatePreview();
       });
     } else {
@@ -229,6 +232,8 @@ function renderProfilingFields() {
       input.type = "text";
       if (field.placeholder) input.placeholder = field.placeholder;
       input.value = state.profiling[field.name] ?? "";
+      input.disabled = !enabled;
+      if (!enabled) wrap.classList.add("disabled");
       input.addEventListener("input", () => {
         state.profiling[field.name] = input.value;
         persistProfiling();
@@ -428,7 +433,7 @@ function selectRun(runId) {
   if (reportBtn) {
     reportBtn.classList.add("hidden");
     reportBtn.disabled = false;
-    reportBtn.textContent = "download report";
+    setReportLabel("Download nsys report");
   }
   stopPolling();
   poll();
@@ -519,6 +524,20 @@ function renderRunState(run) {
   markActiveHistory(run.id);
 }
 
+function setReportLabel(text) {
+  const label = $("#download-report")?.querySelector(".btn-label");
+  if (label) label.textContent = text;
+}
+
+function setReportBusy(busy) {
+  const btn = $("#download-report");
+  if (!btn) return;
+  const icon = btn.querySelector(".btn-icon");
+  const spinner = btn.querySelector(".btn-spinner");
+  if (icon) icon.classList.toggle("hidden", busy);
+  if (spinner) spinner.classList.toggle("hidden", !busy);
+}
+
 function renderReportButton(run) {
   const btn = $("#download-report");
   if (!btn) return;
@@ -534,12 +553,12 @@ function renderReportButton(run) {
   if (!ready) {
     btn.disabled = true;
     btn.title = "The report is written when the run finishes";
-    btn.textContent = "download report";
+    setReportLabel("Download nsys report");
     return;
   }
   btn.disabled = false;
-  btn.title = "Fetch the profiler report from the instance over SSH";
-  btn.textContent = report.downloaded ? "download report (cached)" : "download report";
+  btn.title = "Fetch the Nsight Systems report from the instance over SSH";
+  setReportLabel(report.downloaded ? "Download nsys report (cached)" : "Download nsys report");
 }
 
 function renderPlot(run) {
@@ -720,6 +739,44 @@ function markActiveHistory(runId) {
 // ---------------------------------------------------------------------------
 // Log tools
 // ---------------------------------------------------------------------------
+function setSyncLabel(text) {
+  const label = $("#sync-remote")?.querySelector(".btn-label");
+  if (label) label.textContent = text;
+}
+
+async function syncToRemote() {
+  const btn = $("#sync-remote");
+  const out = $("#connection-output");
+  if (!state.connection.host) {
+    toast("Hostname is required", "error");
+    return;
+  }
+  const original = btn.querySelector(".btn-label")?.textContent || "Sync to remote";
+  btn.disabled = true;
+  setSyncLabel("Syncing…");
+  out.classList.remove("hidden");
+  out.textContent = "packing the working tree and pushing over ssh…";
+  try {
+    const res = await fetch("/api/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ connection: state.connection }),
+    });
+    const data = await res.json();
+    const head = data.ok
+      ? `✓ synced ${data.files} file(s) to ${data.remote_dir} in ${data.duration}s`
+      : `✗ ${data.error || "sync failed"}`;
+    out.textContent = head + "\n\n" + (data.output || "");
+    toast(data.ok ? `Synced ${data.files} file(s) to remote` : data.error || "Sync failed", data.ok ? "ok" : "error");
+  } catch (err) {
+    out.textContent = "sync failed: " + err;
+    toast("Sync failed", "error");
+  } finally {
+    btn.disabled = false;
+    setSyncLabel(original);
+  }
+}
+
 async function downloadLog() {
   if (!state.currentRun) return;
   const res = await fetch(`/api/runs/${state.currentRun}?offset=0`);
@@ -736,10 +793,11 @@ async function downloadLog() {
 async function downloadReport() {
   if (!state.currentRun) return;
   const btn = $("#download-report");
-  const original = btn.textContent;
+  const original = btn.querySelector(".btn-label")?.textContent || "Download nsys report";
   btn.disabled = true;
-  btn.textContent = "fetching…";
-  toast("Fetching profiler report over SSH…");
+  setReportBusy(true);
+  setReportLabel("Downloading…");
+  toast("Fetching Nsight Systems report over SSH…");
   try {
     const res = await fetch(`/api/runs/${state.currentRun}/report`);
     if (!res.ok) {
@@ -754,12 +812,14 @@ async function downloadReport() {
     a.download = name;
     a.click();
     URL.revokeObjectURL(a.href);
-    toast("Profiler report downloaded", "ok");
+    setReportLabel("Download nsys report (cached)");
+    toast("Nsight Systems report downloaded", "ok");
   } catch (err) {
+    setReportLabel(original);
     toast("Report download failed: " + (err.message || err), "error");
   } finally {
     btn.disabled = false;
-    btn.textContent = original;
+    setReportBusy(false);
   }
 }
 
@@ -773,6 +833,7 @@ function clearView() {
 function wire() {
   $("#config-form").addEventListener("submit", startRun);
   $("#test-connection").addEventListener("click", testConnection);
+  $("#sync-remote").addEventListener("click", syncToRemote);
   $("#stop-btn").addEventListener("click", stopRun);
   $("#download-log").addEventListener("click", downloadLog);
   $("#download-report").addEventListener("click", downloadReport);
