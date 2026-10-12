@@ -96,7 +96,9 @@ def step(model: TransformerLM, x: torch.Tensor, y: torch.Tensor, compute: str | 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("step: x=%s y=%s compute=%s optimizer=%s", tuple(x.shape), tuple(y.shape), compute, type(optimizer).__name__ if optimizer else None)
 
-    logits = model(x)
+    with nvtx.range("forward"):
+        logits = model(x)
+        torch.accelerator.synchronize()
 
     if compute is not None:
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
@@ -105,11 +107,19 @@ def step(model: TransformerLM, x: torch.Tensor, y: torch.Tensor, compute: str | 
             logger.debug("loss=%.4f", loss.item())
         if optimizer is not None:
             optimizer.zero_grad()
-        loss.backward()
+        # need to sync before the backward pass to avoid
+        # inflating its time with cross_entropy and zero_grad
+        torch.accelerator.synchronize()
+
+        with nvtx.range("backward"):
+            loss.backward()
+            torch.accelerator.synchronize()
 
         if compute == "bo":
             assert optimizer is not None, "Optimizer should be an AdamW instance if compute == bo"
-            optimizer.step()
+            with nvtx.range("optimizer"):
+                optimizer.step()
+                torch.accelerator.synchronize()
 
 
 def bench(
@@ -131,8 +141,9 @@ def bench(
     logger.debug("Benchmark inputs: x=%s y=%s", tuple(x.shape), tuple(y.shape))
 
     logger.info("Warming up for %d step(s)", warmup_steps)
-    for _ in range(warmup_steps):
-        step(model, x, y, compute, optimizer)
+    with nvtx.range("warmup"):
+        for _ in range(warmup_steps):
+            step(model, x, y, compute, optimizer)
 
     torch.accelerator.synchronize()
 
