@@ -82,6 +82,16 @@ code { font-family: var(--mono); font-size: 0.9em; }
   margin-bottom: 10px; gap: 8px; flex-wrap: wrap;
 }
 .section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-dim); margin: 0; white-space: nowrap; }
+.subsection-head {
+  margin: 16px 0 8px;
+  padding-top: 13px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
 
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -232,6 +242,14 @@ code { font-family: var(--mono); font-size: 0.9em; }
 }
 
 .logs-panel { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 150px; padding: 12px 16px 0; }
+.memviz-panel { flex: 0 0 auto; display: flex; flex-direction: column; min-height: 0; padding: 12px 16px 0; border-top: 1px solid var(--border-soft); margin-top: 12px; }
+.memviz-panel[hidden] { display: none; }
+.memviz-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.memviz-frame {
+  width: 100%; height: 460px; border: 1px solid var(--border-soft);
+  border-radius: 10px; background: #070b10; margin-top: 8px;
+}
+#memviz-hint { padding: 10px 0; }
 .log {
   flex: 1 1 auto;
   background: #070b10;

@@ -4,12 +4,17 @@
 // State
 // ---------------------------------------------------------------------------
 const state = {
-  schema: { connection: [], benchmark: [], profiling: [], presets: {} },
+  schema: { connection: [], benchmark: [], profiling: [], memory: [], presets: {} },
   connection: {},
   params: {},
   profiling: {},
+  memory: {},
   currentRun: null,
   currentRunReportName: null,
+  currentRunMemoryName: null,
+  memvizRun: null,
+  memvizReady: false,
+  memvizLoading: false,
   offset: 0,
   pollTimer: null,
   elapsedTimer: null,
@@ -18,12 +23,16 @@ const state = {
 
 const LS_KEY = "cs336-dashboard-connection-v1";
 const LS_PROFILING_KEY = "cs336-dashboard-profiling-v3";
+const LS_MEMORY_KEY = "cs336-dashboard-memory-v1";
 const REQUIRED = new Set(["d_model", "d_ff", "num_layers", "num_heads"]);
 const ORDER = [
   "d_model", "d_ff", "num_layers", "num_heads", "vocab_size", "context_length", "theta",
   "batch_size", "compute", "warmup_steps", "bench_steps", "verbose",
 ];
 const LONG_TEXT = new Set(["bench_cmd", "setup_cmd", "extra_args", "profiler_cmd", "profiler_args", "report_dir"]);
+// Benchmark flags the dashboard sets itself (from the Memory profile section),
+// so they are hidden from the auto-generated benchmark form.
+const HIDDEN_BENCH_FIELDS = new Set(["memory_profile", "memory_profile_max_entries"]);
 // Per-field minimums. warmup_steps=0 disables warmup; everything else must be >= 1.
 const MIN_VALUE = { warmup_steps: 0 };
 // Dashboard defaults that differ from the CLI defaults (the graph needs per-step data).
@@ -92,9 +101,16 @@ async function loadSchema() {
     state.profiling[field.name] = stored !== undefined ? stored : field.type === "bool" ? !!field.default : field.default;
   }
 
+  const savedMemory = JSON.parse(localStorage.getItem(LS_MEMORY_KEY) || "{}");
+  for (const field of state.schema.memory || []) {
+    const stored = savedMemory[field.name];
+    state.memory[field.name] = stored !== undefined ? stored : field.type === "bool" ? !!field.default : field.default;
+  }
+
   renderConnectionFields();
   renderBenchmarkFields();
   renderProfilingFields();
+  renderMemoryFields();
   renderPresets();
   updatePreview();
 }
@@ -148,9 +164,11 @@ function renderConnectionFields() {
 function renderBenchmarkFields() {
   const container = $("#benchmark-fields");
   container.innerHTML = "";
-  const fields = [...state.schema.benchmark].sort(
-    (a, b) => (ORDER.indexOf(a.name) + 1 || 99) - (ORDER.indexOf(b.name) + 1 || 99)
-  );
+  const fields = [...state.schema.benchmark]
+    .filter((field) => !HIDDEN_BENCH_FIELDS.has(field.name))
+    .sort(
+      (a, b) => (ORDER.indexOf(a.name) + 1 || 99) - (ORDER.indexOf(b.name) + 1 || 99)
+    );
 
   for (const field of fields) {
     const wide = field.name === "compute";
@@ -246,6 +264,47 @@ function renderProfilingFields() {
   }
 }
 
+function renderMemoryFields() {
+  const container = $("#memory-fields");
+  if (!container) return;
+  container.innerHTML = "";
+  const enabled = !!state.memory.enabled;
+  for (const field of state.schema.memory || []) {
+    const wide = LONG_TEXT.has(field.name);
+    const wrap = el("div", "field" + (wide ? " wide" : ""));
+    const label = el("label", null, field.label);
+    wrap.appendChild(label);
+
+    if (field.type === "bool") {
+      const input = el("input");
+      input.type = "checkbox";
+      input.checked = !!state.memory[field.name];
+      label.prepend(input);
+      input.addEventListener("change", () => {
+        state.memory[field.name] = input.checked;
+        persistMemory();
+        renderMemoryFields();
+        updatePreview();
+      });
+    } else {
+      const input = el("input");
+      input.type = field.type === "int" ? "number" : "text";
+      if (field.placeholder) input.placeholder = field.placeholder;
+      input.value = state.memory[field.name] ?? "";
+      input.disabled = !enabled;
+      if (!enabled) wrap.classList.add("disabled");
+      input.addEventListener("input", () => {
+        state.memory[field.name] = input.value;
+        persistMemory();
+        updatePreview();
+      });
+      wrap.appendChild(input);
+    }
+    if (field.help) wrap.appendChild(el("div", "hint", field.help));
+    container.appendChild(wrap);
+  }
+}
+
 function renderPresets() {
   const container = $("#presets");
   container.innerHTML = "";
@@ -279,12 +338,26 @@ function collectProfiling() {
   return out;
 }
 
+function persistMemory() {
+  localStorage.setItem(LS_MEMORY_KEY, JSON.stringify(state.memory));
+}
+
+function collectMemory() {
+  const out = {};
+  for (const field of state.schema.memory || []) {
+    if (field.type === "bool") out[field.name] = !!state.memory[field.name];
+    else if (state.memory[field.name] !== "" && state.memory[field.name] != null) out[field.name] = state.memory[field.name];
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Command preview
 // ---------------------------------------------------------------------------
 function collectParams() {
   const out = {};
   for (const field of state.schema.benchmark) {
+    if (HIDDEN_BENCH_FIELDS.has(field.name)) continue;
     let value = state.params[field.name];
     if (value === "" || value === undefined || value === null) continue;
     out[field.name] = value;
@@ -295,6 +368,7 @@ function collectParams() {
 function buildFlagString() {
   const parts = [];
   for (const field of state.schema.benchmark) {
+    if (HIDDEN_BENCH_FIELDS.has(field.name)) continue;
     const value = state.params[field.name];
     if (field.type === "bool") {
       if (value) parts.push(field.flag);
@@ -316,6 +390,15 @@ function buildPreview() {
   const flags = buildFlagString();
   let command = [bench, flags].filter(Boolean).join(" ");
   let setupText = setup.trim();
+
+  const memory = collectMemory();
+  if (memory.enabled) {
+    const snapshotDir = (memory.snapshot_dir || "profiles").replace(/\/+$/, "") || "profiles";
+    const maxEntries = memory.max_entries || 1000000;
+    command = `${command} --memory-profile ${shellQuote(`${snapshotDir}/<run-id>.pickle`)} --memory-profile-max-entries ${maxEntries}`;
+    const mkdir = `mkdir -p ${shellQuote(snapshotDir)}`;
+    setupText = setupText ? `${mkdir} && ${setupText}` : mkdir;
+  }
 
   const profiling = collectProfiling();
   if (profiling.enabled) {
@@ -399,7 +482,7 @@ async function startRun(event) {
     const res = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ connection: state.connection, params, profiling: collectProfiling() }),
+      body: JSON.stringify({ connection: state.connection, params, profiling: collectProfiling(), memory: collectMemory() }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed to start run");
@@ -429,6 +512,9 @@ function selectRun(runId) {
   $("#log").innerHTML = "";
   $("#log-count").textContent = "";
   state.currentRunReportName = null;
+  state.currentRunMemoryName = null;
+  state.memvizRun = null;
+  resetMemvizViewer();
   const reportItem = $("#menu-download-report");
   if (reportItem) {
     reportItem.classList.add("hidden");
@@ -524,6 +610,7 @@ function renderRunState(run) {
   renderPlot(run);
   renderElapsed(run);
   renderReportButton(run);
+  renderMemviz(run);
   markActiveHistory(run.id);
 }
 
@@ -562,6 +649,127 @@ function renderReportButton(run) {
   btn.disabled = false;
   btn.title = "Fetch the Nsight Systems report from the instance over SSH";
   setReportLabel(report.downloaded ? "Download nsys report (cached)" : "Download nsys report");
+}
+
+function resetMemvizViewer() {
+  const frame = $("#memviz-frame");
+  if (frame) {
+    frame.hidden = true;
+    frame.removeAttribute("src");
+  }
+  state.memvizReady = false;
+  state.memvizLoading = false;
+}
+
+function renderMemviz(run) {
+  const panel = $("#memviz-panel");
+  if (!panel) return;
+  const memory = run.memory || {};
+  if (!memory.enabled) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const ready = TERMINAL.has(run.status);
+  if (state.memvizRun !== run.id) {
+    state.memvizRun = run.id;
+    state.currentRunMemoryName = memory.name || `memory_snapshot-${run.id}.pickle`;
+    resetMemvizViewer();
+  }
+
+  const hint = $("#memviz-hint");
+  const loadBtn = $("#memviz-load");
+  const openBtn = $("#memviz-open");
+  const dlBtn = $("#memviz-download");
+
+  if (state.memvizReady) {
+    hint.classList.add("hidden");
+    loadBtn.classList.add("hidden");
+    openBtn.disabled = false;
+    dlBtn.disabled = false;
+    return;
+  }
+
+  openBtn.disabled = true;
+  dlBtn.disabled = true;
+  hint.classList.remove("hidden");
+  if (!ready) {
+    loadBtn.classList.add("hidden");
+    hint.textContent = "The snapshot is written when the run finishes.";
+    return;
+  }
+  loadBtn.classList.remove("hidden");
+  loadBtn.disabled = false;
+  if (memory.downloaded) {
+    // Already cached on the server: render it without another click.
+    loadMemviz(run.id);
+  } else {
+    hint.textContent = "Click \u201cLoad snapshot\u201d to fetch the CUDA memory snapshot and render the PyTorch memory_viz timeline.";
+  }
+}
+
+async function loadMemviz(runId) {
+  if (state.memvizLoading || state.memvizReady) return;
+  state.memvizLoading = true;
+  const hint = $("#memviz-hint");
+  const frame = $("#memviz-frame");
+  const loadBtn = $("#memviz-load");
+  hint.classList.remove("hidden");
+  hint.textContent = "Fetching CUDA memory snapshot over SSH\u2026";
+  loadBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/runs/${runId}/memory/fetch`, { method: "POST" });
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.json()).detail; } catch (_) { /* non-JSON error */ }
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    state.memvizReady = true;
+    frame.src = `/api/runs/${runId}/memory_viz`;
+    frame.hidden = false;
+    hint.classList.add("hidden");
+    loadBtn.classList.add("hidden");
+    $("#memviz-open").disabled = false;
+    $("#memviz-download").disabled = false;
+    toast("Memory snapshot loaded", "ok");
+  } catch (err) {
+    hint.textContent = "Could not load memory snapshot: " + (err.message || err);
+    loadBtn.classList.remove("hidden");
+    loadBtn.disabled = false;
+    toast("Memory snapshot failed: " + (err.message || err), "error");
+  } finally {
+    state.memvizLoading = false;
+  }
+}
+
+function openMemviz() {
+  if (!state.memvizRun) return;
+  window.open(`/api/runs/${state.memvizRun}/memory_viz`, "_blank", "noopener");
+}
+
+async function downloadMemory() {
+  if (!state.memvizRun) return;
+  const btn = $("#memviz-download");
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/runs/${state.memvizRun}/memory`);
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.json()).detail; } catch (_) { /* non-JSON error */ }
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = state.currentRunMemoryName || `memory_snapshot-${state.memvizRun}.pickle`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("Memory snapshot downloaded", "ok");
+  } catch (err) {
+    toast("Snapshot download failed: " + (err.message || err), "error");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function renderPlot(run) {
@@ -950,6 +1158,9 @@ function wire() {
   $("#menu-export-graph").addEventListener("click", () => { setMenuOpen(false); exportPlot(); });
   $("#menu-download-log").addEventListener("click", () => { setMenuOpen(false); downloadLog(); });
   $("#menu-download-report").addEventListener("click", () => { setMenuOpen(false); downloadReport(); });
+  $("#memviz-load").addEventListener("click", () => state.memvizRun && loadMemviz(state.memvizRun));
+  $("#memviz-open").addEventListener("click", openMemviz);
+  $("#memviz-download").addEventListener("click", downloadMemory);
   $("#export-all").addEventListener("click", exportAll);
   document.addEventListener("click", (event) => {
     if (!event.target.closest(".menu")) setMenuOpen(false);

@@ -58,6 +58,8 @@
             <h2>Profiling</h2>
           </div>
           <div id="profiling-fields" class="fields"></div>
+          <div class="subsection-head">Memory profile</div>
+          <div id="memory-fields" class="fields"></div>
         </section>
 
         <section class="section">
@@ -151,6 +153,20 @@
           <span id="log-count" class="muted small"></span>
         </div>
         <div id="log" class="log" tabindex="0"></div>
+      </div>
+
+      <!-- Memory profile viewer (PyTorch memory_viz) -->
+      <div class="memviz-panel" id="memviz-panel" hidden>
+        <div class="panel-head">
+          <h2>Memory profile</h2>
+          <div class="memviz-tools">
+            <button type="button" id="memviz-load" class="btn tiny ghost">Load snapshot</button>
+            <button type="button" id="memviz-open" class="btn tiny ghost" disabled>Open in new tab</button>
+            <button type="button" id="memviz-download" class="btn tiny ghost" disabled>Download snapshot</button>
+          </div>
+        </div>
+        <div id="memviz-hint" class="muted small"></div>
+        <iframe id="memviz-frame" class="memviz-frame" hidden title="CUDA memory timeline"></iframe>
       </div>
 
       <div class="history">

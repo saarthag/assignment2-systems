@@ -125,6 +125,8 @@ shapes are provided.
   `make deploy`.
 * Optional Nsight Systems / Nsight Compute profiling wrapper with on-demand
   report download (see **Profiling** below).
+* Optional CUDA memory snapshot with an embedded PyTorch `memory_viz` viewer (see
+  **Memory profiling** below).
 
 ## Profiling (optional)
 
@@ -175,6 +177,62 @@ Notes:
 * If `nsys`/`ncu` is not installed or not on `PATH`, the run fails with the
   profiler's error in the log panel.
 
+## Memory profiling (PyTorch `memory_viz`)
+
+The **Memory profile** controls in the **Profiling** panel enable the benchmark's
+CUDA memory recorder and embed PyTorch's
+[memory_viz](https://docs.pytorch.org/memory_viz) viewer in the dashboard. They are
+off by default. Enabling **Record CUDA memory snapshot** appends
+`--memory-profile <snapshot>` and `--memory-profile-max-entries <n>` to the
+benchmark command:
+
+```
+uv run --no-sync python -m cs336_systems.benchmark --per-step-timing <args...> \
+  --memory-profile profiles/<run-id>.pickle --memory-profile-max-entries 1000000
+```
+
+`cs336_systems/benchmark.py` starts `torch.cuda.memory._record_memory_history()`
+after warmup, runs the timed loop, and calls `_dump_snapshot()` (then disables
+recording) once the loop finishes, so the snapshot covers the benchmarked
+steps and the snapshot I/O never lands inside a timed step.
+
+Notes:
+
+* Snapshot size scales with `max_entries` and the number of benchmark steps.
+  Use a small `bench_steps` (e.g. `-n 1`) or a lower **Max history entries** for
+  a quick look; a full XL training step at 1M entries can be hundreds of MB and
+  is pulled back over SSH verbatim.
+* When the run finishes, the **Memory profile** panel auto-loads if the snapshot
+  is already cached; otherwise click **Load snapshot** to fetch it over SSH.
+  **Open in new tab** opens the standalone viewer and **Download snapshot**
+  saves the `.pickle` (the same file `pytorch.org/memory_viz` accepts by
+drag-and-drop).
+* The viewer is the official `MemoryViz.js` from PyTorch, vendored under
+  `dashboard/static/memviz/`. Its d3 dependency is loaded from jsDelivr at view
+  time (the official hosted page does the same), so the *viewer* needs network
+  access even though the snapshot itself is served locally. The snapshot bytes
+  are inlined into the viewer page, so they are never uploaded anywhere.
+* `MEMORY_VIZ_TEMPLATE` in `dashboard/server.py` themes the viewer to match the
+  dashboard (dark palette, spaced controls, carded plot/minimap) and lifts
+  PyTorch's SVG legend out into a separate bar so it no longer overlaps the
+  timeline. The vendored JS is left untouched.
+* `GET /api/runs/<id>/memory_viz` can be opened directly; `POST
+  /api/runs/<id>/memory/fetch` pre-fetches the snapshot; the snapshot is also
+  included in **Export all**.
+
+### Testing without a GPU
+
+`dashboard/sample/make_sample_snapshot.py` fabricates a structurally valid
+snapshot (weights, activations, gradients, optimizer state) so the viewer can be
+exercised on a machine without CUDA:
+
+```sh
+python dashboard/sample/make_sample_snapshot.py   # writes memory_snapshot.pickle
+```
+
+Drop that file onto the dashboard's Memory profile panel (or
+`pytorch.org/memory_viz`) to check the rendering.
+
 ## HTTP API
 
 | Method | Path | Description |
@@ -186,7 +244,10 @@ Notes:
 | `POST` | `/api/runs/<id>/stop` | Stop a running benchmark. |
 | `POST` | `/api/runs/<id>/delete` | Delete a run and its log. |
 | `GET` | `/api/runs/<id>/report` | Fetch (over SSH) and download the profiler report. |
-| `POST` | `/api/runs/<id>/export` | Zip the log, profiler report and optional graph PNG; returns the archive. |
+| `GET` | `/api/runs/<id>/memory` | Fetch (over SSH) and download the CUDA memory snapshot. |
+| `GET` | `/api/runs/<id>/memory_viz` | PyTorch MemoryViz viewer with the snapshot inlined. |
+| `POST` | `/api/runs/<id>/memory/fetch` | Pre-fetch the memory snapshot over SSH (cached). |
+| `POST` | `/api/runs/<id>/export` | Zip the log, profiler report, snapshot and optional graph PNG; returns the archive. |
 | `POST` | `/api/test-connection` | Probe SSH connectivity (blocking). |
 | `POST` | `/api/sync` | Push the local working tree to the remote dir (blocking). |
 
@@ -196,11 +257,15 @@ Notes:
 dashboard/
 ├── server.py          # FastAPI app + SSH orchestration + metric parsing
 ├── schema.py          # AST parser for the benchmark CLI
+├── sample/
+│   ├── make_sample_snapshot.py  # fabricate a snapshot for offline viewer testing
+│   └── memory_snapshot.pickle   # generated sample (gitignored)
 ├── static/
 │   ├── index.html
 │   ├── style.css
 │   ├── app.js
-│   └── nvidia-logo.png  # NVIDIA logomark (from the NVIDIA newsroom logo album)
+│   ├── nvidia-logo.png  # NVIDIA logomark (from the NVIDIA newsroom logo album)
+│   └── memviz/          # vendored PyTorch MemoryViz.js + process_alloc_data.js
 ├── README.md
 └── .runs/             # persisted run metadata + logs (gitignored)
 ```

@@ -95,6 +95,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     parser.add_argument("-v", "--verbose", action="store_true", help="enable debug logging")
     parser.add_argument("--per-step-timing", action="store_true", help="emit per-step timings as JSON lines (used by the dashboard)")
+    parser.add_argument(
+        "--memory-profile",
+        metavar="PICKLE",
+        default=None,
+        help="record a CUDA memory history snapshot to PICKLE (open it with pytorch.org/memory_viz)",
+    )
+    parser.add_argument(
+        "--memory-profile-max-entries",
+        type=int,
+        help="max allocator history entries to record for --memory-profile (default: 1000000)",
+    )
     return parser.parse_args(argv)
 
 
@@ -148,6 +159,8 @@ def bench(
     bench_steps: int = 100,
     per_step_timing: bool = False,
     use_amp: bool = False,
+    memory_profile: str | None = None,
+    memory_profile_max_entries: int = 1_000_000,
 ) -> float:
     device = torch.accelerator.current_accelerator() or torch.device("cpu")
     logger.info("Using device: %s", device)
@@ -165,6 +178,13 @@ def bench(
             step(model, x, y, device.type, compute, optimizer, use_amp)
 
     torch.accelerator.synchronize()
+
+    recording_memory = bool(memory_profile) and torch.cuda.is_available()
+    if memory_profile and not recording_memory:
+        logger.error("--memory-profile requires CUDA; no snapshot will be written")
+    if recording_memory:
+        logger.info("Recording CUDA memory history (max_entries=%d)", memory_profile_max_entries)
+        torch.cuda.memory._record_memory_history(max_entries=memory_profile_max_entries)
 
     logger.info("Benchmarking %d step(s) (compute=%s)", bench_steps, compute)
     step_times: list[float] = []
@@ -201,6 +221,11 @@ def bench(
             ),
             flush=True,
         )
+    if recording_memory:
+        assert memory_profile is not None, "memory_profile is set when recording_memory is True"
+        torch.cuda.memory._dump_snapshot(memory_profile)
+        torch.cuda.memory._record_memory_history(enabled=None)
+        logger.info("Wrote CUDA memory snapshot to %s", memory_profile)
     return per_step
 
 
@@ -252,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
         bench_steps=args.bench_steps,
         per_step_timing=args.per_step_timing,
         use_amp=args.amp,
+        memory_profile=args.memory_profile,
+        memory_profile_max_entries=args.memory_profile_max_entries or 1_000_000,
     )
 
     return 0

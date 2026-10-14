@@ -21,6 +21,9 @@ HTTP API (see ``dashboard/README.md`` for details):
 * ``POST /api/runs/<id>/stop``      -> stop a running run
 * ``POST /api/runs/<id>/delete``    -> remove a run
 * ``GET  /api/runs/<id>/report``    -> fetch + download the profiler report
+* ``GET  /api/runs/<id>/memory``    -> fetch + download the CUDA memory snapshot
+* ``GET  /api/runs/<id>/memory_viz``-> PyTorch MemoryViz viewer for the snapshot
+* ``POST /api/runs/<id>/memory/fetch`` -> pre-fetch the snapshot over SSH
 * ``POST /api/test-connection``     -> probe ssh connectivity (blocking)
 * ``POST /api/sync``                -> push the local working tree to the remote dir
 * ``POST /api/runs/<id>/export``    -> zip the log, report and graph for download
@@ -97,6 +100,176 @@ DEFAULT_PROFILER_ARGS = (
     "--cpuctxsw=none"
 )
 DEFAULT_PROFILER_DIR = "profiles"
+
+# Optional CUDA memory snapshot. When enabled the benchmark CLI is passed
+# ``--memory-profile <prefix>.pickle`` and the snapshot is pulled back over SSH
+# on demand for the in-dashboard MemoryViz viewer (pytorch.org/memory_viz).
+DEFAULT_MEMORY_DIR = "profiles"
+DEFAULT_MEMORY_MAX_ENTRIES = 1_000_000
+
+# Official PyTorch memory-viewer bootstrap. The snapshot is inlined as base64 so
+# the bundled viewer can decode it without a second request. MemoryViz.js and its
+# d3 imports are loaded from jsDelivr (the same modules docs.pytorch.org/memory_viz
+# uses); the vendored copy in dashboard/static/memviz pins the viewer itself.
+MEMORY_VIZ_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>CUDA memory snapshot</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 13px;
+    }
+    /* Toolbar (snapshot/view/device selects). */
+    body > div:first-of-type {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      background: #131a23;
+      border-bottom: 1px solid #243040;
+    }
+    select, input {
+      background: #0a0f16;
+      color: #d6e0ec;
+      border: 1px solid #243040;
+      border-radius: 7px;
+      padding: 5px 9px;
+      font-size: 12px;
+      font-family: inherit;
+      outline: none;
+    }
+    select:hover { border-color: #33414f; }
+    select:focus, input:focus { border-color: #5b9dff; box-shadow: 0 0 0 3px rgba(91, 157, 255, 0.15); }
+    input[type="checkbox"] { accent-color: #5b9dff; width: auto; }
+    input[type="range"] { accent-color: #5b9dff; background: transparent; padding: 0; }
+    input[type="text"] { font-family: ui-monospace, Menlo, Consolas, monospace; }
+    /* The snapshot is already loaded, so the native file picker is redundant. */
+    body > input[type="file"] { display: none; }
+    label { color: #8896a8; font-size: 12px; }
+    body > label { padding: 12px 18px 0; }
+    /* Plot + legend. */
+    svg { display: block; }
+    svg text { fill: #8b949e; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    svg rect[fill="white"] { fill: #0b1117; }
+    .tick line, .domain { stroke: #2a3644; }
+    /* Detail slider + search row. */
+    .mv-tools {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0 14px;
+    }
+    .mv-tools input[type="range"] { flex: 1 1 160px; min-width: 120px; }
+    .mv-tools label { white-space: nowrap; }
+    /* Legend, lifted out of the SVG so it no longer covers the plot. */
+    .mv-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 22px;
+      padding: 11px 15px;
+      margin: 0 0 14px;
+      background: #0a0f16;
+      border: 1px solid #1b2532;
+      border-radius: 9px;
+    }
+    .mv-legend-item { display: inline-flex; align-items: center; gap: 8px; color: #c9d1d9; font-size: 12px; }
+    .mv-legend-item i { width: 11px; height: 11px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14); }
+    .mv-viewer { padding: 16px 18px 18px; }
+    .mv-plot { border: 1px solid #1b2532; border-radius: 10px; overflow: hidden; }
+    .mv-minimap { border: 1px solid #1b2532; border-radius: 10px; overflow: hidden; background: #0b1117; }
+    .mv-context { min-height: 0; }
+    /* Stack trace / allocator settings panes. */
+    pre {
+      background: #0a0f16;
+      color: #b8c6d8;
+      border: 1px solid #1b2532;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #26313f; border-radius: 6px; border: 2px solid #0d1117; }
+    ::-webkit-scrollbar-thumb:hover { background: #33414f; }
+  </style>
+</head>
+<body>
+<script type="module">
+import {add_local_files} from "/static/memviz/MemoryViz.js"
+const local_files = $SNAPSHOT
+add_local_files(local_files, $VIZ_KIND)
+
+// PyTorch's viewer draws the legend inside the plot SVG at fixed coordinates,
+// which overlaps the timeline and reads as cramped. Lift it into an HTML bar
+// and give the surrounding controls room to breathe.
+const PALETTE = ["#4e79a7", "#f28e2c", "#e15759", "#76b7b2", "#59a14f", "#edc949", "#af7aa1", "#ff9da7", "#9c755f", "#bab0ab"];
+
+function enhance() {
+  const grid = [...document.querySelectorAll("div")].find((d) => (d.getAttribute("style") || "").includes("grid-template-rows: 10fr"));
+  if (!grid) return false;
+  const viewer = grid.parentElement;
+  viewer.classList.add("mv-viewer");
+  grid.style.gridTemplateRows = "14fr 0.9fr 4fr";
+  const tools = grid.previousElementSibling;
+  if (tools) {
+    tools.classList.add("mv-tools");
+    [...tools.querySelectorAll("span")].forEach((s) => {
+      if (s.textContent.trim() === "|") s.style.display = "none";
+    });
+  }
+  if (grid.children[0]) grid.children[0].classList.add("mv-plot");
+  if (grid.children[1]) grid.children[1].classList.add("mv-minimap");
+  if (grid.children[2]) grid.children[2].classList.add("mv-context");
+
+  const textGs = [...document.querySelectorAll("svg g")].filter((g) => g.querySelector('text[font-family="helvetica"]'));
+  const rectGs = [...document.querySelectorAll("svg g")].filter((g) => g.querySelector('rect[width="10"][height="10"][x="100"]'));
+  if (textGs.length && rectGs.length) {
+    const textG = textGs[textGs.length - 1];
+    const rectG = rectGs[rectGs.length - 1];
+    const labels = [...textG.querySelectorAll("text")].map((t) => t.textContent);
+    const fills = [...rectG.querySelectorAll("rect")].map((r) => r.getAttribute("fill"));
+    textG.style.display = "none";
+    rectG.style.display = "none";
+    if (labels.length && !viewer.querySelector(":scope > .mv-legend")) {
+      const bar = document.createElement("div");
+      bar.className = "mv-legend";
+      labels.forEach((label, i) => {
+        const item = document.createElement("span");
+        item.className = "mv-legend-item";
+        const swatch = document.createElement("i");
+        swatch.style.background = fills[i] || PALETTE[i % PALETTE.length];
+        item.appendChild(swatch);
+        item.append(label);
+        bar.appendChild(item);
+      });
+      viewer.insertBefore(bar, grid);
+    }
+  }
+  return true;
+}
+
+enhance();
+let attempts = 0;
+const timer = setInterval(() => {
+  if (enhance() || ++attempts > 25) clearInterval(timer);
+}, 200);
+new MutationObserver(() => queueMicrotask(enhance)).observe(document.body, { childList: true, subtree: true });
+</script>
+</body>
+</html>
+"""
 
 BENCH_FALLBACK = "uv run --no-sync python -m cs336_systems.benchmark"
 
@@ -192,6 +365,35 @@ PROFILING_FIELDS: list[dict[str, Any]] = [
     },
 ]
 
+# CUDA memory-snapshot settings. These map onto the benchmark CLI's
+# ``--memory-profile`` flag; the dashboard owns the output path so it can pull
+# the snapshot back for the MemoryViz panel.
+MEMORY_FIELDS: list[dict[str, Any]] = [
+    {
+        "name": "enabled",
+        "label": "Record CUDA memory snapshot",
+        "type": "bool",
+        "default": False,
+        "help": "Run the benchmark with --memory-profile and view the timeline with PyTorch's memory_viz viewer.",
+    },
+    {
+        "name": "snapshot_dir",
+        "label": "Remote snapshot dir",
+        "type": "str",
+        "default": DEFAULT_MEMORY_DIR,
+        "placeholder": DEFAULT_MEMORY_DIR,
+        "help": "Where the snapshot is written on the instance (relative to the remote dir, or absolute).",
+    },
+    {
+        "name": "max_entries",
+        "label": "Max history entries",
+        "type": "int",
+        "default": DEFAULT_MEMORY_MAX_ENTRIES,
+        "placeholder": str(DEFAULT_MEMORY_MAX_ENTRIES),
+        "help": "Allocator history ring-buffer size. Larger captures more steps but makes the snapshot (and SSH transfer) bigger.",
+    },
+]
+
 MODEL_FIELDS = {"d_model", "d_ff", "num_layers", "num_heads"}
 RUN_FIELDS = {"warmup_steps", "bench_steps", "verbose"}
 PARAM_PRESETS = {
@@ -211,6 +413,10 @@ ProfilingConfig = create_model(
     "ProfilingConfig",
     **{field["name"]: (_TYPE_MAP[field["type"]], field["default"]) for field in PROFILING_FIELDS},
 )
+MemoryConfig = create_model(
+    "MemoryConfig",
+    **{field["name"]: (_TYPE_MAP[field["type"]], field["default"]) for field in MEMORY_FIELDS},
+)
 
 
 class ConnectionRequest(BaseModel):
@@ -221,6 +427,7 @@ class RunRequest(BaseModel):
     connection: ConnectionConfig
     params: dict[str, Any] = Field(default_factory=dict)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
 
 class ExportRequest(BaseModel):
@@ -340,6 +547,8 @@ class Run:
         argv: list[str],
         profiling: dict[str, Any] | None = None,
         report_path: str = "",
+        memory: dict[str, Any] | None = None,
+        memory_path: str = "",
     ):
         self.id = run_id
         self.created_at = time.time()
@@ -355,6 +564,8 @@ class Run:
         self.argv = argv
         self.profiling = dict(profiling or {})
         self.report_path = report_path or ""
+        self.memory = dict(memory or {})
+        self.memory_path = memory_path or ""
         self.logs: list[dict[str, Any]] = []
         self.metrics: list[dict[str, Any]] = []
         self.result: dict[str, Any] = {}
@@ -429,6 +640,7 @@ class Run:
             "result": self.result,
             "profiling": self.profiling,
             "report": self.report_info(),
+            "memory": self.memory_info(),
             "log_count": len(self.logs),
             "metric_count": len(self.metrics),
         }
@@ -450,6 +662,8 @@ class Run:
         meta["connection"] = self.connection
         meta["profiling"] = self.profiling
         meta["report_path"] = self.report_path
+        meta["memory"] = self.memory
+        meta["memory_path"] = self.memory_path
         (self._dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     def close(self) -> None:
@@ -494,6 +708,44 @@ class Run:
             return False, "remote report is empty or missing"
         return True, None
 
+    # -- CUDA memory snapshot ------------------------------------------
+    def memory_local_path(self) -> Path:
+        return self._dir / (Path(self.memory_path).name or "memory_snapshot.pickle")
+
+    def memory_info(self) -> dict[str, Any]:
+        enabled = bool(self.memory.get("enabled")) and bool(self.memory_path)
+        return {
+            "enabled": enabled,
+            "remote_path": self.memory_path or None,
+            "name": Path(self.memory_path).name if self.memory_path else None,
+            "downloaded": enabled and self.memory_local_path().exists(),
+        }
+
+    def fetch_memory(self) -> tuple[bool, str | None]:
+        """Copy the CUDA memory snapshot from the instance over SSH (cached)."""
+        if not (self.memory.get("enabled") and self.memory_path):
+            return False, "memory profiling was not enabled for this run"
+        local = self.memory_local_path()
+        if local.exists() and local.stat().st_size > 0:
+            return True, None
+        remote_dir = str(self.connection.get("remote_dir") or DEFAULT_REMOTE_DIR)
+        remote = f"cd {shlex.quote(remote_dir)} && test -f {shlex.quote(self.memory_path)} && cat {shlex.quote(self.memory_path)}"
+        argv = build_ssh_argv(self.connection, remote)
+        self.ingest(f"[dashboard] fetching memory snapshot: {self.memory_path}")
+        try:
+            with local.open("wb") as fh:
+                proc = subprocess.run(argv, stdout=fh, stderr=subprocess.PIPE, check=False)
+        except FileNotFoundError:
+            return False, "ssh executable not found on PATH"
+        if proc.returncode != 0:
+            local.unlink(missing_ok=True)
+            detail = (proc.stderr or b"").decode(errors="replace").strip()
+            return False, detail or f"ssh exited with code {proc.returncode}"
+        if not local.exists() or local.stat().st_size == 0:
+            local.unlink(missing_ok=True)
+            return False, "remote memory snapshot is empty or missing"
+        return True, None
+
     @classmethod
     def load(cls, run_dir: Path) -> Run | None:
         meta_path = run_dir / "meta.json"
@@ -512,6 +764,8 @@ class Run:
             meta.get("argv", []),
             meta.get("profiling", {}),
             meta.get("report_path", ""),
+            meta.get("memory", {}),
+            meta.get("memory_path", ""),
         )
         run.created_at = meta.get("created_at", run.created_at)
         run.started_at = meta.get("started_at")
@@ -583,8 +837,9 @@ class Runner:
     """Spawns ssh and pumps the merged stdout/stderr into a :class:`Run`."""
 
     @staticmethod
-    def start(store: RunStore, connection: dict[str, Any], params: dict[str, Any], profiling: dict[str, Any] | None = None) -> Run:
+    def start(store: RunStore, connection: dict[str, Any], params: dict[str, Any], profiling: dict[str, Any] | None = None, memory: dict[str, Any] | None = None) -> Run:
         profiling = dict(profiling or {})
+        memory = dict(memory or {})
         schema = extract_cli_schema()
         env_path = str(connection.get("env_path") or DEFAULT_ENV_PATH)
         command = build_remote_command(
@@ -598,18 +853,29 @@ class Runner:
 
         run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         report_path = ""
+        memory_path = ""
+        setup_prepend: list[str] = []
+        if memory.get("enabled"):
+            snapshot_dir = str(memory.get("snapshot_dir") or DEFAULT_MEMORY_DIR).strip() or DEFAULT_MEMORY_DIR
+            setup_prepend.append(f"mkdir -p {shlex.quote(snapshot_dir)}")
+            snapshot_prefix = f"{snapshot_dir.rstrip('/')}/{run_id}"
+            memory_path = f"{snapshot_prefix}.pickle"
+            max_entries = int(memory.get("max_entries") or DEFAULT_MEMORY_MAX_ENTRIES)
+            command = f"{command} --memory-profile {shlex.quote(memory_path)} --memory-profile-max-entries {max_entries}"
         if profiling.get("enabled"):
             report_dir = str(profiling.get("report_dir") or DEFAULT_PROFILER_DIR).strip() or DEFAULT_PROFILER_DIR
-            mkdir = f"mkdir -p {shlex.quote(report_dir)}"
-            setup = f"{mkdir} && {setup}" if setup.strip() else mkdir
+            setup_prepend.append(f"mkdir -p {shlex.quote(report_dir)}")
             report_prefix = f"{report_dir.rstrip('/')}/{run_id}"
             command = f"{build_profiler_prefix(profiling, report_prefix)} {command}"
             report_path = f"{report_prefix}{report_extension(str(profiling.get('profiler_cmd') or ''))}"
+        if setup_prepend:
+            prefix = " && ".join(dict.fromkeys(setup_prepend))
+            setup = f"{prefix} && {setup}" if setup.strip() else prefix
 
         remote_command = build_full_remote(remote_dir, env_path, setup, command)
         argv = build_ssh_argv(connection, remote_command)
 
-        run = Run(run_id, dict(connection), dict(params), command, remote_command, argv, profiling, report_path)
+        run = Run(run_id, dict(connection), dict(params), command, remote_command, argv, profiling, report_path, memory, memory_path)
         store.add(run)
         threading.Thread(target=Runner._run, args=(run,), daemon=True).start()
         return run
@@ -799,7 +1065,7 @@ def plotly_bundle() -> FileResponse:
 
 @app.get("/api/schema")
 def api_schema() -> dict[str, Any]:
-    return {"connection": CONNECTION_FIELDS, "benchmark": SCHEMA, "profiling": PROFILING_FIELDS, "presets": PARAM_PRESETS}
+    return {"connection": CONNECTION_FIELDS, "benchmark": SCHEMA, "profiling": PROFILING_FIELDS, "memory": MEMORY_FIELDS, "presets": PARAM_PRESETS}
 
 
 @app.get("/api/runs")
@@ -819,7 +1085,9 @@ def api_start_run(req: RunRequest) -> dict[str, Any]:
     clean_params = {key: _coerce({"type": next((s["type"] for s in SCHEMA if s["name"] == key), "str")}, value) for key, value in params.items()}
     raw_profiling = req.profiling.model_dump()
     profiling = {field["name"]: _coerce(field, raw_profiling.get(field["name"])) for field in PROFILING_FIELDS}
-    run = Runner.start(STORE, connection, clean_params, profiling)
+    raw_memory = req.memory.model_dump()
+    memory = {field["name"]: _coerce(field, raw_memory.get(field["name"])) for field in MEMORY_FIELDS}
+    run = Runner.start(STORE, connection, clean_params, profiling, memory)
     return run.summary()
 
 
@@ -859,6 +1127,52 @@ def api_download_report(run_id: str) -> FileResponse:
     return FileResponse(local, filename=local.name, media_type="application/octet-stream")
 
 
+@app.post("/api/runs/{run_id}/memory/fetch")
+def api_fetch_memory(run_id: str) -> dict[str, Any]:
+    """Pull the CUDA memory snapshot from the instance over SSH (cached)."""
+    run = STORE.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not (run.memory.get("enabled") and run.memory_path):
+        raise HTTPException(status_code=400, detail="memory profiling was not enabled for this run")
+    ok, error = run.fetch_memory()
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"could not fetch memory snapshot: {error}")
+    return {"ok": True, **run.memory_info()}
+
+
+@app.get("/api/runs/{run_id}/memory")
+def api_download_memory(run_id: str) -> FileResponse:
+    run = STORE.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not (run.memory.get("enabled") and run.memory_path):
+        raise HTTPException(status_code=400, detail="memory profiling was not enabled for this run")
+    ok, error = run.fetch_memory()
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"could not fetch memory snapshot: {error}")
+    local = run.memory_local_path()
+    return FileResponse(local, filename=local.name, media_type="application/octet-stream")
+
+
+@app.get("/api/runs/{run_id}/memory_viz")
+def api_memory_viz(run_id: str) -> Response:
+    """Serve PyTorch's MemoryViz viewer with this run's snapshot inlined."""
+    run = STORE.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not (run.memory.get("enabled") and run.memory_path):
+        raise HTTPException(status_code=400, detail="memory profiling was not enabled for this run")
+    ok, error = run.fetch_memory()
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"could not fetch memory snapshot: {error}")
+    local = run.memory_local_path()
+    encoded = base64.b64encode(local.read_bytes()).decode("ascii")
+    files = json.dumps([{"name": local.name, "base64": encoded}])
+    html = MEMORY_VIZ_TEMPLATE.replace("$VIZ_KIND", repr("Active Memory Timeline")).replace("$SNAPSHOT", files)
+    return Response(content=html, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
 @app.post("/api/test-connection")
 def api_test_connection(req: ConnectionRequest) -> dict[str, Any]:
     return probe_connection(req.connection.model_dump())
@@ -879,6 +1193,8 @@ def api_export_run(run_id: str, req: ExportRequest | None = None) -> Response:
     # log written below. A failed fetch just omits the report from the archive.
     if run.profiling.get("enabled") and run.report_path:
         run.fetch_report()
+    if run.memory.get("enabled") and run.memory_path:
+        run.fetch_memory()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
         meta = {**run.summary(), "argv": run.argv, "connection": run.connection}
@@ -887,6 +1203,9 @@ def api_export_run(run_id: str, req: ExportRequest | None = None) -> Response:
         local_report = run.report_local_path()
         if run.report_info().get("downloaded") and local_report.exists():
             archive.write(local_report, arcname=local_report.name)
+        local_memory = run.memory_local_path()
+        if run.memory_info().get("downloaded") and local_memory.exists():
+            archive.write(local_memory, arcname=local_memory.name)
         graph = req.graph_png if req else None
         if isinstance(graph, str) and graph.startswith("data:image/png;base64,"):
             try:
