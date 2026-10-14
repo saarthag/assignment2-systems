@@ -5,6 +5,7 @@ import math
 import shlex
 import statistics
 import timeit
+from contextlib import nullcontext
 from functools import partial
 from typing import Any
 
@@ -83,6 +84,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="unset = forward only, 'b' = forward+backward, 'bo' = forward+backward+optimizer step",
     )
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="run the forward pass and loss under bfloat16 autocast",
+    )
 
     parser.add_argument("-w", "--warmup-steps", type=int, default=10, help="number of warmup steps (default: 10)")
     parser.add_argument("-n", "--bench-steps", type=int, default=100, help="number of timed steps (default: 100)")
@@ -92,19 +98,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def step(model: TransformerLM, x: torch.Tensor, y: torch.Tensor, compute: str | None = None, optimizer: AdamW | None = None):
+def step(model: TransformerLM, x: torch.Tensor, y: torch.Tensor, device: str, compute: str | None, optimizer: AdamW | None, use_amp: bool = False):
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("step: x=%s y=%s compute=%s optimizer=%s", tuple(x.shape), tuple(y.shape), compute, type(optimizer).__name__ if optimizer else None)
 
-    with nvtx.range("forward"):
-        logits = model(x)
-        torch.accelerator.synchronize()
+    ctx = torch.autocast(device_type=device, dtype=torch.bfloat16) if use_amp else nullcontext()
+
+    # Autocast is scoped to the forward pass and loss only. Backward ops run in the same type
+    # that autocast used for the corresponding forward ops, and the PyTorch docs recommend
+    # exiting the autocast context before calling backward.
+    loss = None
+    with ctx:
+        with nvtx.range("forward"):
+            logits = model(x)
+            torch.accelerator.synchronize()
+
+        if compute is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            if logger.isEnabledFor(logging.DEBUG):
+                # NOTE: .item() forces a device sync, which perturbs timing; only evaluated with -v.
+                logger.debug("loss=%.4f", loss.item())
 
     if compute is not None:
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-        if logger.isEnabledFor(logging.DEBUG):
-            # NOTE: .item() forces a device sync, which perturbs timing; only evaluated with -v.
-            logger.debug("loss=%.4f", loss.item())
         if optimizer is not None:
             optimizer.zero_grad()
         # need to sync before the backward pass to avoid
@@ -112,6 +127,7 @@ def step(model: TransformerLM, x: torch.Tensor, y: torch.Tensor, compute: str | 
         torch.accelerator.synchronize()
 
         with nvtx.range("backward"):
+            assert loss is not None, "loss must be computed for backward ops"
             loss.backward()
             torch.accelerator.synchronize()
 
@@ -131,9 +147,12 @@ def bench(
     warmup_steps: int = 10,
     bench_steps: int = 100,
     per_step_timing: bool = False,
+    use_amp: bool = False,
 ) -> float:
     device = torch.accelerator.current_accelerator() or torch.device("cpu")
     logger.info("Using device: %s", device)
+    if use_amp:
+        logger.info("Using bfloat16 autocast on %s", device.type)
     model = model.to(device)
 
     x = torch.randint(high=config.vocab_size, size=(batch_size, config.context_length), device=device)
@@ -143,7 +162,7 @@ def bench(
     logger.info("Warming up for %d step(s)", warmup_steps)
     with nvtx.range("warmup"):
         for _ in range(warmup_steps):
-            step(model, x, y, compute, optimizer)
+            step(model, x, y, device.type, compute, optimizer, use_amp)
 
     torch.accelerator.synchronize()
 
@@ -153,7 +172,7 @@ def bench(
     for index in range(bench_steps):
         if per_step_timing:
             step_start = timeit.default_timer()
-        step(model, x, y, compute, optimizer)
+        step(model, x, y, device.type, compute, optimizer, use_amp)
         if per_step_timing:
             torch.accelerator.synchronize()
             step_ms = (timeit.default_timer() - step_start) * 1e3
@@ -232,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         warmup_steps=args.warmup_steps,
         bench_steps=args.bench_steps,
         per_step_timing=args.per_step_timing,
+        use_amp=args.amp,
     )
 
     return 0
