@@ -179,12 +179,14 @@ def bench(
 
     torch.accelerator.synchronize()
 
-    recording_memory = bool(memory_profile) and torch.cuda.is_available()
-    if memory_profile and not recording_memory:
-        logger.error("--memory-profile requires CUDA; no snapshot will be written")
-    if recording_memory:
-        logger.info("Recording CUDA memory history (max_entries=%d)", memory_profile_max_entries)
-        torch.cuda.memory._record_memory_history(max_entries=memory_profile_max_entries)
+    recording_mem = False
+    if memory_profile is not None and len(memory_profile) > 0:
+        if torch.cuda.is_available():
+            recording_mem = True
+            logger.info("Recording CUDA memory history (max_entries=%d)", memory_profile_max_entries)
+            torch.cuda.memory._record_memory_history(max_entries=memory_profile_max_entries)
+        else:
+            logger.error("--memory-profile requires CUDA; no snapshot will be written")
 
     logger.info("Benchmarking %d step(s) (compute=%s)", bench_steps, compute)
     step_times: list[float] = []
@@ -221,8 +223,8 @@ def bench(
             ),
             flush=True,
         )
-    if recording_memory:
-        assert memory_profile is not None, "memory_profile is set when recording_memory is True"
+    if recording_mem:
+        assert memory_profile is not None, "memory_profile is set when recording_mem is True"
         torch.cuda.memory._dump_snapshot(memory_profile)
         torch.cuda.memory._record_memory_history(enabled=None)
         logger.info("Wrote CUDA memory snapshot to %s", memory_profile)

@@ -12,6 +12,7 @@ const state = {
   currentRun: null,
   currentRunReportName: null,
   currentRunMemoryName: null,
+  currentRunStatus: null,
   memvizRun: null,
   memvizReady: false,
   memvizLoading: false,
@@ -513,6 +514,7 @@ function selectRun(runId) {
   $("#log-count").textContent = "";
   state.currentRunReportName = null;
   state.currentRunMemoryName = null;
+  state.currentRunStatus = null;
   state.memvizRun = null;
   resetMemvizViewer();
   const reportItem = $("#menu-download-report");
@@ -520,6 +522,11 @@ function selectRun(runId) {
     reportItem.classList.add("hidden");
     reportItem.disabled = false;
     setReportLabel("Download nsys report");
+  }
+  const memoryItem = $("#menu-download-memory");
+  if (memoryItem) {
+    memoryItem.classList.add("hidden");
+    memoryItem.disabled = false;
   }
   const graphItem = $("#menu-export-graph");
   if (graphItem) graphItem.disabled = true;
@@ -597,6 +604,7 @@ function renderRunState(run) {
   const pill = $("#run-status");
   pill.textContent = run.status;
   pill.className = "pill " + run.status;
+  state.currentRunStatus = run.status;
 
   const title = run.params?.d_model
     ? `d_model=${run.params.d_model} · layers=${run.params.num_layers ?? "?"} · heads=${run.params.num_heads ?? "?"} · batch=${run.params.batch_size ?? "?"} · ctx=${run.params.context_length ?? 512}`
@@ -610,6 +618,7 @@ function renderRunState(run) {
   renderPlot(run);
   renderElapsed(run);
   renderReportButton(run);
+  renderMemoryDownloadButton(run);
   renderMemviz(run);
   markActiveHistory(run.id);
 }
@@ -651,6 +660,22 @@ function renderReportButton(run) {
   setReportLabel(report.downloaded ? "Download nsys report (cached)" : "Download nsys report");
 }
 
+function renderMemoryDownloadButton(run) {
+  const btn = $("#menu-download-memory");
+  if (!btn) return;
+  const memory = run.memory || {};
+  if (!memory.enabled) {
+    btn.classList.add("hidden");
+    return;
+  }
+  btn.classList.remove("hidden");
+  const ready = TERMINAL.has(run.status);
+  btn.disabled = !ready;
+  btn.title = ready
+    ? "Download the CUDA memory snapshot (.pickle) from the instance over SSH"
+    : "The snapshot is written when the run finishes";
+}
+
 function resetMemvizViewer() {
   const frame = $("#memviz-frame");
   if (frame) {
@@ -690,8 +715,10 @@ function renderMemviz(run) {
     return;
   }
 
+  // Downloading fetches on demand, so it only needs the run to be finished,
+  // not the viewer to be loaded.
   openBtn.disabled = true;
-  dlBtn.disabled = true;
+  dlBtn.disabled = !ready;
   hint.classList.remove("hidden");
   if (!ready) {
     loadBtn.classList.add("hidden");
@@ -748,11 +775,12 @@ function openMemviz() {
 }
 
 async function downloadMemory() {
-  if (!state.memvizRun) return;
+  const runId = state.currentRun;
+  if (!runId) return;
   const btn = $("#memviz-download");
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   try {
-    const res = await fetch(`/api/runs/${state.memvizRun}/memory`);
+    const res = await fetch(`/api/runs/${runId}/memory`);
     if (!res.ok) {
       let detail = "";
       try { detail = (await res.json()).detail; } catch (_) { /* non-JSON error */ }
@@ -761,14 +789,14 @@ async function downloadMemory() {
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = state.currentRunMemoryName || `memory_snapshot-${state.memvizRun}.pickle`;
+    a.download = state.currentRunMemoryName || `memory_snapshot-${runId}.pickle`;
     a.click();
     URL.revokeObjectURL(a.href);
     toast("Memory snapshot downloaded", "ok");
   } catch (err) {
     toast("Snapshot download failed: " + (err.message || err), "error");
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = !TERMINAL.has(state.currentRunStatus || "");
   }
 }
 
@@ -1158,6 +1186,7 @@ function wire() {
   $("#menu-export-graph").addEventListener("click", () => { setMenuOpen(false); exportPlot(); });
   $("#menu-download-log").addEventListener("click", () => { setMenuOpen(false); downloadLog(); });
   $("#menu-download-report").addEventListener("click", () => { setMenuOpen(false); downloadReport(); });
+  $("#menu-download-memory").addEventListener("click", () => { setMenuOpen(false); downloadMemory(); });
   $("#memviz-load").addEventListener("click", () => state.memvizRun && loadMemviz(state.memvizRun));
   $("#memviz-open").addEventListener("click", openMemviz);
   $("#memviz-download").addEventListener("click", downloadMemory);

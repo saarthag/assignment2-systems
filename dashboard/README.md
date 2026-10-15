@@ -106,10 +106,10 @@ shapes are provided.
 
 * Live Plotly graph of step number vs per-step time, with a dashed mean line.
 * An **Export** dropdown in the output toolbar with per-artifact downloads —
-  per-step graph (PNG, panel background baked in), benchmark log, and the
-  Nsight Systems report.
-* **Export all** button that bundles the log, report and graph into a single
-  zip archive downloaded from `POST /api/runs/<id>/export`.
+  per-step graph (PNG, panel background baked in), benchmark log, the
+  Nsight Systems report, and the CUDA memory snapshot.
+* **Export all** button that bundles the log, report, memory snapshot and graph
+  into a single zip archive downloaded from `POST /api/runs/<id>/export`.
 * Aggregate metric cards: mean, std dev, min, max, median, steps, params,
   duration and exit code.
 * Live logs (stdout + stderr merged) in a secondary panel under the graph, with
